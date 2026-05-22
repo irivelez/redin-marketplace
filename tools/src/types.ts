@@ -67,8 +67,59 @@ export type IdentifyUserTecnico = TecnicoExtendedRow & {
   especialidades: string[] | null;
   modalidad: string | null;
 };
+
+// Compact summary of the worker's most-recent submitted dossier. The agent
+// uses this to AVOID re-asking fields that are already known (Gap A.2).
+// Only populated when the worker has a dossier (candidate_state in pending,
+// needs_call, approved, revoked, rejected) — never for fresh 'screening'.
+export interface DossierSummary {
+  submitted_at: string;                          // ISO timestamp
+  // Self-declared profile fields
+  cedula_present: boolean;
+  modalidad: string | null;                      // 'individual' | 'cuadrilla'
+  ciudad_base: string | null;
+  ciudades_cobertura: string[] | null;
+  categorias_principales: string[] | null;
+  subcategorias: string[] | null;
+  anos_experiencia: number | null;
+  // Compliance declarations (true = declared yes; null = unknown)
+  arl_activa: boolean | null;
+  eps_activa: boolean | null;
+  antecedentes_limpios: boolean | null;
+  // Tools & vehicle
+  vehiculo_propio: boolean | null;
+  tipo_vehiculo: string | null;
+  placa_vehiculo: string | null;
+  herramientas_basicas: boolean | null;
+  // Certifications (declared)
+  cert_altura: boolean | null;
+  cert_retie: boolean | null;
+  cert_andamios: boolean | null;
+  // Document presence (uploaded artifacts, separate from declared status)
+  has_arl_doc: boolean;
+  has_eps_doc: boolean;
+  has_cert_estudios_doc: boolean;
+  has_cert_trabajos_doc: boolean;
+  // External references collected (jefe anterior, etc.)
+  has_referencias: boolean;
+  referencias_count: number;
+  // Toño's last recommendation snapshot
+  tono_recommendation: "recommend_approve" | "recommend_reject" | "recommend_call";
+  tono_confidence: number;
+}
+
 export type IdentifyUserOutput =
-  | { found: true; tecnico: IdentifyUserTecnico }
+  | {
+      found: true;
+      tecnico: IdentifyUserTecnico;
+      /**
+       * Present when the worker has submitted a dossier (candidate_state in
+       * pending/needs_call/approved/revoked/rejected). Use this to skip
+       * re-asking fields the worker already provided. Absent for fresh
+       * screening workers (no prior dossier).
+       */
+      dossier_summary?: DossierSummary;
+    }
   | { found: false; phone: string };
 
 // ---------- register_tecnico ----------
