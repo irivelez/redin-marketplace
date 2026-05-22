@@ -65,7 +65,11 @@ export interface HandleMessageResult {
   tool_calls_full: { name: string; args: Record<string, unknown>; result: ToolResult<unknown> }[];
 }
 
-type RoutingMode = "enrichment" | "screening" | "returning";
+type RoutingMode =
+  | "enrichment"      // approved + profile_complete=false → collect missing fields
+  | "screening"       // no row OR candidate_state in (screening, rejected → reopen) → run dossier
+  | "returning"       // approved + profile_complete=true → offer jobs / handle requests
+  | "pending_review"; // candidate_state in (pending, needs_call) → wait for HR, do NOT re-screen
 
 type TurnError = {
   stage: "llm" | "router" | "tool" | "cost";
@@ -389,6 +393,18 @@ export async function handleMessage(
         routingMode = "enrichment";
       } else if (currentCandidateState === "approved" && profileComplete) {
         routingMode = "returning";
+      } else if (
+        currentCandidateState === "pending" ||
+        currentCandidateState === "needs_call"
+      ) {
+        // Worker already submitted a dossier and is waiting for HR. Do NOT
+        // re-run screening — that's why they were getting re-asked cédula,
+        // herramientas, vehicle, etc. on the second visit. The prompt's
+        // pending_review block tells the LLM to acknowledge queue position
+        // without re-screening; the LLM still has read_my_postulaciones,
+        // read_my_contratos, escalate_to_hr if the worker asks something
+        // substantive.
+        routingMode = "pending_review";
       } else {
         routingMode = "screening";
       }
@@ -590,24 +606,43 @@ export async function handleMessage(
   // Empty-text safety net. If the model went silent after a tool call (e.g.
   // it consumed the tool result and emitted no text on the follow-up
   // iteration), substitute a deterministic fallback so an empty WhatsApp
-  // bubble never reaches the user. Two cases:
-  //   - at least one tool call succeeded -> warm "anotado" confirmation, the
-  //     conversation keeps moving.
-  //   - no tool succeeded (or no tools at all) -> reuse the same hold message
-  //     the max-iterations branch produces, signalling "let me check".
+  // bubble never reaches the user.
   //
-  // TODO INVESTIGATE post-pilot: Haiku 4.5 occasionally returns empty text
-  // after register_tecnico / complete_legacy_profile tool results. The
-  // fallback below handles user-facing impact correctly (no empty bubble),
-  // but the root cause is unknown — could be max_tokens cutoff inside the
-  // tool-use loop, a quirk of how the SDK reports usage on no-text turns,
-  // or a model behavior under tool_result blocks. Not blocking the live
-  // pilot; revisit when we have a reproducible test case in isolation.
+  // Gap A.1 fix (2026-05-22): the previous "anytool-succeeded → 'Perfecto,
+  // anotado…'" branch was producing the BUG that opens conversations with
+  // "Perfecto, anotado. ¿Algo más que quieras contarme?" — because the LLM
+  // sometimes calls log_event(session_start) (a model-hallucinated pattern,
+  // not in the prompt or codebase) as its first tool and then returns
+  // empty text. The fallback was designed for register_tecnico /
+  // complete_legacy_profile cases where "anotado" is genuinely appropriate.
+  // Now we branch on whether a STATE-CHANGING tool actually succeeded.
+  const STATE_CHANGING_TOOLS = new Set([
+    "register_tecnico",
+    "complete_legacy_profile",
+    "submit_candidate_dossier",
+    "mark_candidate_withdrawn",
+    "upload_documento",
+    "create_postulacion",
+  ]);
   if (!modelUnavailable && reply.trim() === "" && turn) {
+    const stateChangingOk = turn.toolCallsMade.some(
+      (tc) => tc.result.ok && STATE_CHANGING_TOOLS.has(tc.name)
+    );
     const anyOk = turn.toolCallsMade.some((tc) => tc.result.ok);
-    if (anyOk) {
+    if (stateChangingOk) {
+      // Real state change happened — "anotado" is genuine
       reply = "Perfecto, anotado. ¿Algo más que quieras contarme?";
-      log.warn("substituted empty-text reply (post-tool)", {
+      log.warn("substituted empty-text reply (state-changing tool ok)", {
+        phone,
+        session_id: session.id,
+        tools: turn.toolCallsMade.map((tc) => tc.name),
+      });
+    } else if (anyOk) {
+      // Only no-op tools (identify_user, find_by_cedula, read_*, log_event,
+      // escalate_to_hr). No state changed, so "anotado" is misleading. Use a
+      // neutral greeting-style filler that matches Toño's voice.
+      reply = "Un momento, déjame ver. ¿Qué necesitas?";
+      log.warn("substituted empty-text reply (no-op tool only)", {
         phone,
         session_id: session.id,
         tools: turn.toolCallsMade.map((tc) => tc.name),

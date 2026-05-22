@@ -64,6 +64,19 @@ const TOOLS_WITH_TECNICO_ID_ARG = new Set([
   "complete_legacy_profile",
 ]);
 
+// ---------- Tools always allowed before identification ----------
+// identify_user is the obvious one. find_by_cedula is also pre-identify because
+// it's the lookup that bridges cedula → tecnico_id. log_event for *refusals*
+// is allowed because the refusal protocol fires before any other tool.
+// Everything ELSE the model might want to call (read_pending_ots,
+// register_tecnico, escalate_to_hr, log_event for non-refused events, etc)
+// must wait until identify_user runs. This catches the model hallucinating
+// log_event(type='session_start') as a polite first move — see Gap A.1.
+const PRE_IDENTIFY_TOOLS = new Set([
+  "identify_user",
+  "find_by_cedula",
+]);
+
 // ---------- Rule 1: identify-first + auth gating ----------
 
 export interface RouterRefusal {
@@ -116,6 +129,36 @@ export function preDispatch(
         error:
           "Antes de esto necesito saber quién eres — dame tu cédula o el número de teléfono que usas aquí.",
         code: "not_identified",
+      },
+    };
+  }
+
+  // Rule 1b — identify-first enforcement.
+  //
+  // Even though most tools are auth-free (log_event, read_pending_ots,
+  // escalate_to_hr, etc), the system contract requires `identify_user` to be
+  // the FIRST tool of a session so we know whether to route screening /
+  // pending_review / enrichment / returning before doing anything else.
+  // Without this guard the LLM can (and has) called log_event(session_start)
+  // as a "polite" first move, hallucinating both the type and the need —
+  // then return empty text and trigger the agent.ts empty-reply fallback.
+  // This was the root cause of the "Perfecto, anotado" non-sequitur opener.
+  //
+  // We bypass the rule for `find_by_cedula` because it's the cedula lookup
+  // that BRIDGES into identification (the LLM may legitimately call it
+  // before identify_user if the worker volunteers a cedula upfront).
+  if (
+    session.tecnico_id === null &&
+    session.toolCallCount === 0 && // counter is bumped at the bottom of preDispatch
+    !PRE_IDENTIFY_TOOLS.has(toolName)
+  ) {
+    return {
+      kind: "refusal",
+      result: {
+        ok: false,
+        error:
+          "Llama identify_user primero. No registres eventos ni leas datos antes de saber con quién hablas.",
+        code: "must_identify_first",
       },
     };
   }
