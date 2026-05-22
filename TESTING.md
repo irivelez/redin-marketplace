@@ -24,6 +24,20 @@ The launch loop we're validating, in plain Spanish:
 - For each stage, before passing it, copy/paste the SQL observability queries (bottom of doc) and confirm rows.
 - Treat the doc as the test transcript: edit it live, annotate with timestamps and observations.
 
+## Infrastructure URLs
+
+| Service | URL | Notes |
+|---|---|---|
+| **Dashboard (Railway)** | https://dashboard-mp-production-1ef3.up.railway.app | Auto-deploys on push to `irinavelezk/main`. Note the `-1ef3` suffix — Railway-assigned unique. |
+| HR qualification queue | https://dashboard-mp-production-1ef3.up.railway.app/hr/qualification-queue | Alberto's card lives here when state=pending |
+| HR pipeline | https://dashboard-mp-production-1ef3.up.railway.app/hr/pipeline | Per-OT state pills |
+| HR shortlist (test OT) | https://dashboard-mp-production-1ef3.up.railway.app/hr/shortlist/LK4cgHD0DlytRsCBwx8zKZ | Test OT `TEST TONO — DO NOT EXECUTE` |
+| Alberto's detail | https://dashboard-mp-production-1ef3.up.railway.app/hr/tecnicos/82b9791c-629b-4954-a39b-71cb4cc2d289 | Full timeline + decisions |
+| Contratos list | https://dashboard-mp-production-1ef3.up.railway.app/hr/contratos | After contract generation |
+| Public landing | https://dashboard-mp-production-1ef3.up.railway.app | Pre-login |
+| Apply for test OT (public) | https://dashboard-mp-production-1ef3.up.railway.app/aplicar/LK4cgHD0DlytRsCBwx8zKZ | Web-discovery → WhatsApp deep-link |
+| Supabase project | `foerbjhnwbxfauajkbld` | For SQL editor + Storage browser |
+
 ## Test artifacts (one-time setup)
 
 Fill these in before Stage 0:
@@ -34,10 +48,11 @@ Fill these in before Stage 0:
 | Test técnico phone B (returning worker, for §9.6) | `_____________` | Optional; can reuse A after a 60-min idle |
 | Test arquitecto phone | `_____________` | Must match `arquitectos_mirror.data->>'Cedula'` for the cédula gate |
 | Test arquitecto cédula | `_____________` | Verify exists in `arquitectos_mirror` |
-| Test OT row_id (AppSheet) | `_____________` | Title: `TEST — DO NOT EXECUTE — <fecha>`, state `4. Coordinar – Listo para ejecutar`, ID_Arquitecto = test arquitecto |
-| Test OT ciudad | `_____________` | Must match test técnico's ciudad string after normalization |
-| Test OT especialidad | `_____________` | Must match test técnico's `categorias_principales` |
+| Test OT row_id (AppSheet) | `LK4cgHD0DlytRsCBwx8zKZ` | Title: `TEST TONO — DO NOT EXECUTE`, state `4. Coordinar – Listo para ejecutar`, ID_Arquitecto = `3Ueb6rlyBC9l2LNRF09D2x` |
+| Test OT ciudad | `Popayan` | Confirmed in `ots_mirror` 2026-05-22 |
+| Test OT especialidad | — (no especialidad field; descripcion `TEST TONO — DO NOT EXECUTE`) | Filter by ciudad only |
 | HR test user (Supabase Auth) | `_____________` | Use a dedicated email; don't test with Jose's prod credential |
+| Alberto's tecnico_id (running test worker) | `82b9791c-629b-4954-a39b-71cb4cc2d289` | candidate_state=pending, ciudad=Popayán (corrected 2026-05-22 07:54 UTC) |
 
 **Tagging convention:** every test event/message we generate should be discoverable later. Use one of:
 - WA messages from test phones (filter by phone in `eventos` / `messages` / `outbound_messages`)

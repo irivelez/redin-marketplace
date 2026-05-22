@@ -7,7 +7,7 @@ import { serverClientBoundToCookies } from "@/lib/supabase-server";
 // NEXT_PUBLIC_SITE_URL so redirects always land on the public host.
 const SITE_URL =
   process.env.NEXT_PUBLIC_SITE_URL ||
-  "https://dashboard-mp-production.up.railway.app";
+  "https://dashboard-mp-production-1ef3.up.railway.app";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
