@@ -112,6 +112,7 @@ export default async function TecnicoDetailPage({
     contratosRes,
     evaluationsRes,
     eventsRes,
+    documentosRes,
   ] = await Promise.all([
     supa
       .from("eventos")
@@ -177,6 +178,14 @@ export default async function TecnicoDetailPage({
       .eq("entity_id", tecnicoId)
       .order("created_at", { ascending: false })
       .limit(100),
+    // Gap A.5/A.6 follow-up — all documents uploaded by this worker. HR
+    // needs visibility into what evidence has actually been received so
+    // they can validate and approve.
+    supa
+      .from("documentos")
+      .select("id, tipo, storage_path, uploaded_at, validated_by, validated_at")
+      .eq("tecnico_id", tecnicoId)
+      .order("uploaded_at", { ascending: false }),
   ]);
 
   const reg = parseRegistered(regEventRes.data?.meta);
@@ -189,6 +198,7 @@ export default async function TecnicoDetailPage({
   const contratos = contratosRes.data ?? [];
   const evaluations = evaluationsRes.data ?? [];
   const events = eventsRes.data ?? [];
+  const documentos = documentosRes.data ?? [];
 
   // OT lookup for postulaciones, contratos, and evaluaciones — every list
   // below renders the OT human title (descripcion fallback ciudad) as primary.
@@ -248,6 +258,17 @@ export default async function TecnicoDetailPage({
   const canRevoke = tec.candidate_state === "approved";
   const canReopen =
     tec.candidate_state === "rejected" || tec.candidate_state === "withdrawn";
+  // Gap A.5 extension — pending/needs_call workers need the approve/reject/
+  // schedule_call actions on this page too, not just /hr/qualification-queue.
+  // HR should be able to act without navigating away from the worker detail
+  // where they're reviewing the evidence and timeline.
+  const canApprove =
+    tec.candidate_state === "pending" || tec.candidate_state === "needs_call";
+  const canReject =
+    tec.candidate_state === "pending" || tec.candidate_state === "needs_call";
+  const canScheduleCall = tec.candidate_state === "pending";
+  const canUnscheduleCall = tec.candidate_state === "needs_call";
+  const latestDossierId = dossiers.length > 0 ? dossiers[0]!.id : null;
 
   // Gap A.5 — Documentos pendientes (ARL/EPS evidence). Surfaces the
   // declared-but-not-uploaded mandatory docs + "Pedir por WhatsApp" buttons.
@@ -334,36 +355,100 @@ export default async function TecnicoDetailPage({
         </div>
 
         {/* Decision actions — gated on current state */}
-        {(canRevoke || canReopen) && (
-          <div className="mt-4 pt-4 border-t border-slate-100 flex gap-2 flex-wrap">
-            {canRevoke && (
-              <form action={submitDecision}>
-                <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
-                <input type="hidden" name="prior_state" value={tec.candidate_state} />
-                <input type="hidden" name="dossier_id" value="" />
-                <input type="hidden" name="decision" value={"revoke" satisfies HrAction} />
-                <button
-                  type="submit"
-                  className="text-sm bg-rose-600 hover:bg-rose-700 text-white rounded-md px-4 py-1.5"
-                >
-                  Revocar
-                </button>
-              </form>
+        {(canApprove || canReject || canScheduleCall || canUnscheduleCall || canRevoke || canReopen) && (
+          <div className="mt-4 pt-4 border-t border-slate-100">
+            {missingDocs && missingDocs.missing.length > 0 && canApprove && (
+              <div className="mb-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                ⚠ Faltan documentos de respaldo ({missingDocs.missing.map((m) => m.label.split(" ")[0]).join(", ")}).
+                Si vas a aprobar igual, agrega una nota explicando cómo validaste (ej. llamada telefónica).
+              </div>
             )}
-            {canReopen && (
-              <form action={submitDecision}>
-                <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
-                <input type="hidden" name="prior_state" value={tec.candidate_state} />
-                <input type="hidden" name="dossier_id" value="" />
-                <input type="hidden" name="decision" value={"reopen" satisfies HrAction} />
-                <button
-                  type="submit"
-                  className="text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-md px-4 py-1.5"
-                >
-                  Reabrir
-                </button>
-              </form>
-            )}
+            <div className="flex gap-2 flex-wrap">
+              {canApprove && (
+                <form action={submitDecision}>
+                  <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
+                  <input type="hidden" name="prior_state" value={tec.candidate_state} />
+                  <input type="hidden" name="dossier_id" value={latestDossierId ?? ""} />
+                  <input type="hidden" name="decision" value={"approve" satisfies HrAction} />
+                  <button
+                    type="submit"
+                    className="text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-4 py-1.5"
+                  >
+                    Aprobar
+                  </button>
+                </form>
+              )}
+              {canScheduleCall && (
+                <form action={submitDecision}>
+                  <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
+                  <input type="hidden" name="prior_state" value={tec.candidate_state} />
+                  <input type="hidden" name="dossier_id" value={latestDossierId ?? ""} />
+                  <input type="hidden" name="decision" value={"schedule_call" satisfies HrAction} />
+                  <button
+                    type="submit"
+                    className="text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-md px-4 py-1.5"
+                  >
+                    Pedir llamada
+                  </button>
+                </form>
+              )}
+              {canUnscheduleCall && (
+                <form action={submitDecision}>
+                  <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
+                  <input type="hidden" name="prior_state" value={tec.candidate_state} />
+                  <input type="hidden" name="dossier_id" value={latestDossierId ?? ""} />
+                  <input type="hidden" name="decision" value={"unschedule_call" satisfies HrAction} />
+                  <button
+                    type="submit"
+                    className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md px-4 py-1.5"
+                  >
+                    Quitar llamada
+                  </button>
+                </form>
+              )}
+              {canReject && (
+                <form action={submitDecision}>
+                  <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
+                  <input type="hidden" name="prior_state" value={tec.candidate_state} />
+                  <input type="hidden" name="dossier_id" value={latestDossierId ?? ""} />
+                  <input type="hidden" name="decision" value={"reject" satisfies HrAction} />
+                  <button
+                    type="submit"
+                    className="text-sm border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-md px-4 py-1.5"
+                  >
+                    Rechazar
+                  </button>
+                </form>
+              )}
+              {canRevoke && (
+                <form action={submitDecision}>
+                  <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
+                  <input type="hidden" name="prior_state" value={tec.candidate_state} />
+                  <input type="hidden" name="dossier_id" value="" />
+                  <input type="hidden" name="decision" value={"revoke" satisfies HrAction} />
+                  <button
+                    type="submit"
+                    className="text-sm bg-rose-600 hover:bg-rose-700 text-white rounded-md px-4 py-1.5"
+                  >
+                    Revocar
+                  </button>
+                </form>
+              )}
+              {canReopen && (
+                <form action={submitDecision}>
+                  <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
+                  <input type="hidden" name="prior_state" value={tec.candidate_state} />
+                  <input type="hidden" name="dossier_id" value="" />
+                  <input type="hidden" name="decision" value={"reopen" satisfies HrAction} />
+                  <button
+                    type="submit"
+                    className="text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-md px-4 py-1.5"
+                  >
+                    Reabrir
+                  </button>
+                </form>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -407,6 +492,80 @@ export default async function TecnicoDetailPage({
                 </form>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Documentos subidos — Gap A.5 follow-up
+          Shows every document the worker has uploaded so HR can actually
+          view the evidence and validate. Click → inline view (image/PDF).
+          Most-recent first. The "Documentos pendientes" card above auto-
+          excludes types that appear here (uploaded-after-dossier override
+          in getMissingDocsForWorker). */}
+      {documentos.length > 0 && (
+        <div className="card p-4 border-l-4 border-emerald-400 bg-emerald-50">
+          <div className="text-xs uppercase tracking-wide text-emerald-700 mb-2">
+            Documentos subidos — {documentos.length} {documentos.length === 1 ? "archivo" : "archivos"}
+          </div>
+          <ul className="space-y-2">
+            {documentos.map((d) => {
+              const tipoLabel: Record<string, string> = {
+                evidencia_arl: "Evidencia ARL",
+                evidencia_eps: "Evidencia EPS",
+                cedula: "Cédula",
+                cert_estudios: "Certificado de estudios",
+                cert_trabajos_previos: "Trabajos previos",
+                cert_electrica: "Certificación eléctrica",
+                arl: "ARL (legacy)",
+                ss: "Seguridad social",
+                altura: "Certificado de alturas",
+                antecedentes: "Antecedentes",
+                otro: "Otro",
+              };
+              const label = tipoLabel[d.tipo as string] ?? d.tipo;
+              const validated = !!d.validated_at;
+              const ext = d.storage_path.split(".").pop()?.toLowerCase() ?? "";
+              const isImage = ["jpg", "jpeg", "png", "webp"].includes(ext);
+              return (
+                <li
+                  key={d.id}
+                  className="flex items-center justify-between gap-3 text-sm bg-white border border-emerald-200 rounded px-3 py-2"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-slate-800">{label}</span>
+                      <span className="text-[11px] text-slate-500 truncate font-mono">
+                        {d.storage_path.split("/").pop()}
+                      </span>
+                      {validated ? (
+                        <span className="text-[11px] bg-emerald-100 text-emerald-700 rounded px-1.5 py-0.5">
+                          ✓ validado
+                        </span>
+                      ) : (
+                        <span className="text-[11px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">
+                          sin validar
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      subido {fmt(d.uploaded_at)}
+                      {validated && d.validated_by && <> · validado por {d.validated_by} ({fmt(d.validated_at)})</>}
+                    </div>
+                  </div>
+                  <a
+                    href={`/api/documentos/${d.id}/view`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-3 py-1.5"
+                  >
+                    {isImage ? "Ver foto" : "Ver documento"}
+                  </a>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="text-[11px] text-emerald-700 mt-3">
+            Tip: el link abre el archivo en una pestaña nueva. Imágenes y PDFs se renderizan inline.
           </div>
         </div>
       )}

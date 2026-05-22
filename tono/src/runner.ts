@@ -30,6 +30,7 @@ async function main() {
 
   const wa = new WhatsAppClient({
     authDir: defaultAuthDir(),
+    supabase,
     printQr: true,
     handlers: {
       onReady: () => {
@@ -38,7 +39,7 @@ async function main() {
           number_env: process.env.WA_NUMBER ?? "(unset)",
         });
       },
-      onMessage: async ({ phone, text, jid }) => {
+      onMessage: async ({ phone, text, jid, media }) => {
         mutex
           .run(phone, async () => {
             const toolCtx = makeDefaultToolContext({
@@ -52,6 +53,7 @@ async function main() {
               channel: "whatsapp",
               toolCtx,
               jid,
+              media,
             });
             log.info("handled", {
               phone,

@@ -56,6 +56,22 @@ export interface HandleMessageInput {
   channel: SessionChannel;
   toolCtx?: ToolContext;
   jid?: string;
+  /**
+   * Gap A.5/A.6 follow-up — inbound WhatsApp media (photo or PDF). When
+   * present, agent.ts injects a `[MEDIA_RECEIVED: …]` sentinel into the
+   * user message so the LLM can call upload_documento with the right
+   * tipo (ARL/EPS/cert) based on conversation context. The storage_path
+   * is already in the `documentos` bucket — upload_documento accepts it
+   * directly without re-uploading.
+   */
+  media?: {
+    storage_path: string;
+    signed_url: string;
+    mime: string;
+    filename: string;
+    caption?: string;
+    kind: "image" | "document";
+  };
 }
 
 export interface HandleMessageResult {
@@ -562,6 +578,17 @@ export async function handleMessage(
   }
   if (nombreFromRow) contextLines.push(`[session_name: ${nombreFromRow}]`);
   if (ciudadFromRow) contextLines.push(`[session_ciudad: ${ciudadFromRow}]`);
+
+  // Gap A.5/A.6 follow-up — when the inbound WA carries media, inject a
+  // sentinel so the LLM can call upload_documento with the right tipo.
+  // The path is already in the `documentos` bucket (whatsapp.ts uploads
+  // to documentos/incoming/<phone>/<uuid>.<ext>), so upload_documento can
+  // record it without re-uploading.
+  if (input.media) {
+    contextLines.push(
+      `[MEDIA_RECEIVED: kind=${input.media.kind} mime=${input.media.mime} storage_path=${input.media.storage_path} filename=${input.media.filename}]`
+    );
+  }
   const userMessage = `${contextLines.join("\n")}\n${wrapData(text, "tecnico")}`;
 
   const errorsCollected: TurnError[] = [];

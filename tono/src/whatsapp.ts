@@ -8,6 +8,7 @@
 import { Boom } from "@hapi/boom";
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
   type WASocket,
@@ -17,20 +18,46 @@ import makeWASocket, {
 import qrcode from "qrcode-terminal";
 import { createLogger, phoneFromJid } from "@redin/shared";
 import { INPUT_CAPS } from "@redin/tools/schemas";
+import { randomUUID } from "node:crypto";
 import pino from "pino";
 import path from "node:path";
 import fs from "node:fs";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 const log = createLogger("tono:wa");
 
+// Gap A.5/A.6 follow-up — Tono needs to capture inbound media (photos +
+// PDFs of ARL/EPS evidence) and pass storage paths to the LLM so it can
+// call upload_documento with the right tipo. Mirrors Manos's pattern but
+// stores to the `documentos` bucket so the upload_documento tool can
+// reference the same path without re-uploading.
+const INBOUND_MEDIA_BUCKET = "documentos";
+
+export interface InboundMedia {
+  storage_path: string;   // path inside the `documentos` bucket
+  signed_url: string;     // 24h signed URL — LLM can preview if needed
+  mime: string;
+  filename: string;
+  caption?: string;       // user's text caption on the media, if any
+  kind: "image" | "document";
+}
+
 export interface WhatsAppHandlers {
-  onMessage: (ev: { phone: string; text: string; jid: string }) => Promise<void>;
+  onMessage: (ev: {
+    phone: string;
+    text: string;
+    jid: string;
+    media?: InboundMedia;
+  }) => Promise<void>;
   onReady?: () => void | Promise<void>;
 }
 
 export interface WhatsAppOptions {
   authDir: string;
   handlers: WhatsAppHandlers;
+  // Supabase client for inbound-media uploads. Required when media handling
+  // is enabled (always-on in v1).
+  supabase: SupabaseClient;
   // If true, print QR to stdout. False in prod (we pair once, creds persist).
   printQr?: boolean;
 }
@@ -144,16 +171,77 @@ export class WhatsAppClient {
   private async handleIncoming(msg: WAMessage): Promise<void> {
     if (msg.key.fromMe) return;
     if (!msg.message) return;
-    // Only handle text and extended text (captioned messages etc. out of scope for v1).
     const jid = msg.key.remoteJid ?? "";
     if (!jid || jid.endsWith("@g.us")) return; // skip groups in v1
-    const text =
-      msg.message.conversation ??
-      msg.message.extendedTextMessage?.text ??
-      "";
-    if (!text.trim()) return;
     const phone = phoneFromJid(jid);
     if (!phone) return;
+
+    const msgContent = msg.message;
+
+    // ---- Image message: download + upload to Storage, pass to handler ----
+    // Captures ARL/EPS photos the worker sends after the HR doc-request or
+    // Toño proactive followup. The LLM sees `[MEDIA_RECEIVED: …]` injected
+    // by agent.ts into the user message and calls upload_documento with
+    // the right tipo based on conversation context.
+    if (msgContent.imageMessage) {
+      const captionRaw = msgContent.imageMessage.caption?.trim() ?? "";
+      const caption =
+        captionRaw.length > INPUT_CAPS.whatsapp
+          ? captionRaw.slice(0, INPUT_CAPS.whatsapp)
+          : captionRaw;
+      const media = await this.downloadAndStore(msg, phone, {
+        ext: "jpg",
+        mime: "image/jpeg",
+        kind: "image",
+      });
+      if (media) media.caption = caption;
+      const text = caption.length > 0 ? caption : "[foto]";
+      await this.opts.handlers.onMessage({
+        phone,
+        text,
+        jid,
+        media: media ?? undefined,
+      });
+      return;
+    }
+
+    // ---- Document message (PDF) — same pattern as image ----
+    const docMsg =
+      msgContent.documentMessage ??
+      msgContent.documentWithCaptionMessage?.message?.documentMessage;
+    if (docMsg) {
+      const captionRaw =
+        msgContent.documentWithCaptionMessage?.message?.documentMessage?.caption?.trim() ?? "";
+      const caption =
+        captionRaw.length > INPUT_CAPS.whatsapp
+          ? captionRaw.slice(0, INPUT_CAPS.whatsapp)
+          : captionRaw;
+      const fileName = docMsg.fileName ?? "documento.pdf";
+      const ext = (fileName.split(".").pop() ?? "pdf").toLowerCase();
+      const mime = docMsg.mimetype ?? "application/pdf";
+      const media = await this.downloadAndStore(msg, phone, {
+        ext,
+        mime,
+        kind: "document",
+        filename: fileName,
+      });
+      if (media) media.caption = caption;
+      const text = caption.length > 0 ? caption : `[documento: ${fileName}]`;
+      await this.opts.handlers.onMessage({
+        phone,
+        text,
+        jid,
+        media: media ?? undefined,
+      });
+      return;
+    }
+
+    // ---- Text message (default) ----
+    const text =
+      msgContent.conversation ??
+      msgContent.extendedTextMessage?.text ??
+      "";
+    if (!text.trim()) return;
     // PRD §20 cap — truncate before LLM assembly; log internally, no user-visible error.
     let safeText = text;
     if (text.length > INPUT_CAPS.whatsapp) {
@@ -161,6 +249,72 @@ export class WhatsAppClient {
       safeText = text.slice(0, INPUT_CAPS.whatsapp);
     }
     await this.opts.handlers.onMessage({ phone, text: safeText, jid });
+  }
+
+  // Downloads inbound media to Supabase Storage under
+  // documentos/incoming/<phone>/<uuid>.<ext>. Returns the storage path +
+  // 24h signed URL so the LLM can preview if needed AND can re-use the
+  // path when calling upload_documento (which accepts a pre-existing
+  // storage_path without re-uploading).
+  private async downloadAndStore(
+    msg: WAMessage,
+    phone: string,
+    args: { ext: string; mime: string; kind: "image" | "document"; filename?: string }
+  ): Promise<InboundMedia | null> {
+    try {
+      if (!this.sock) {
+        log.warn("downloadAndStore: socket not ready", { phone });
+        return null;
+      }
+      const buffer = (await downloadMediaMessage(msg, "buffer", {}, {
+        logger: pino({ level: "silent" }) as unknown as pino.Logger,
+        reuploadRequest: this.sock.updateMediaMessage,
+      })) as Buffer;
+
+      const uuid = randomUUID();
+      const cleanExt = args.ext.replace(/[^a-z0-9]/gi, "").slice(0, 8) || "bin";
+      const storagePath = `incoming/${phone}/${Date.now()}-${uuid}.${cleanExt}`;
+      const filename = args.filename ?? `${uuid}.${cleanExt}`;
+
+      const { error: upErr } = await this.opts.supabase.storage
+        .from(INBOUND_MEDIA_BUCKET)
+        .upload(storagePath, buffer, {
+          contentType: args.mime,
+          upsert: false,
+        });
+      if (upErr) {
+        log.error("inbound media upload failed", { phone, error: upErr.message });
+        return null;
+      }
+
+      const { data: signed } = await this.opts.supabase.storage
+        .from(INBOUND_MEDIA_BUCKET)
+        .createSignedUrl(storagePath, 86400);
+      if (!signed?.signedUrl) {
+        log.warn("no signed URL for inbound media", { phone, storagePath });
+      }
+
+      log.info("inbound media stored", {
+        phone,
+        storage_path: storagePath,
+        kind: args.kind,
+        size_bytes: buffer.length,
+      });
+
+      return {
+        storage_path: storagePath,
+        signed_url: signed?.signedUrl ?? "",
+        mime: args.mime,
+        filename,
+        kind: args.kind,
+      };
+    } catch (e) {
+      log.error("downloadAndStore threw", {
+        phone,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return null;
+    }
   }
 }
 

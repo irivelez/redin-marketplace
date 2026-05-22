@@ -1,14 +1,19 @@
 // Pair-only mode: starts Baileys just long enough to show the QR and save creds.
 // Once connection opens, we exit. Use `npm run tono:pair` once per number.
 
-import { createLogger } from "@redin/shared";
+import { createLogger, createServerClient } from "@redin/shared";
 import { WhatsAppClient, defaultAuthDir } from "./whatsapp";
 
 const log = createLogger("tono:pair");
 
 async function main() {
+  // We never receive media during pairing, but the WhatsAppClient now
+  // requires supabase for inbound-media handling — instantiate it anyway
+  // so the type contract is satisfied.
+  const supabase = createServerClient();
   const wa = new WhatsAppClient({
     authDir: defaultAuthDir(),
+    supabase,
     printQr: true,
     handlers: {
       onMessage: async () => {
