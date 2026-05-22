@@ -291,6 +291,34 @@ function validatePayload(
   if (!raw.arl_doc_id) missingOptional.push("ARL");
   if (!raw.eps_doc_id) missingOptional.push("EPS");
 
+  // Gap A.4 strict-docs rule (2026-05-22): if the worker declared ARL or EPS
+  // active but did NOT upload supporting evidence, the profile is INCOMPLETE
+  // for HR decision-making purposes. Override Toño's recommendation to
+  // `recommend_call` regardless of what the LLM proposed — RRHH should call
+  // and either get the doc or downgrade. This is the only place the tool
+  // overrides the LLM's recommendation; everywhere else the LLM owns the
+  // signal.
+  let finalRecommendation = raw.tono_recommendation;
+  let finalConfidence = raw.tono_confidence;
+  let finalReasoning = reasoning;
+  const cumplimiento = raw.cumplimiento ?? { arl_activa: false, eps_activa: false, antecedentes_limpios: null };
+  const arlDeclaredNoDoc = cumplimiento.arl_activa === true && !raw.arl_doc_id;
+  const epsDeclaredNoDoc = cumplimiento.eps_activa === true && !raw.eps_doc_id;
+  if ((arlDeclaredNoDoc || epsDeclaredNoDoc) && raw.tono_recommendation === "recommend_approve") {
+    finalRecommendation = "recommend_call";
+    // Keep the original confidence as a signal of how confident Toño was
+    // BEFORE the override, but clamp to 0.70 max — strict-docs rule is a
+    // hard policy that should always be visible as "needs call".
+    finalConfidence = Math.min(raw.tono_confidence, 0.7);
+    const missingDocs: string[] = [];
+    if (arlDeclaredNoDoc) missingDocs.push("ARL");
+    if (epsDeclaredNoDoc) missingDocs.push("EPS");
+    finalReasoning = `[Auto-downgrade: ${missingDocs.join(" + ")} declarada(s) pero sin documento subido — requiere llamada para validar o pedir evidencia.] ${reasoning}`.slice(0, 500);
+    warnings.push(
+      `tono_recommendation downgraded from recommend_approve to recommend_call: missing ${missingDocs.join("+")} doc(s)`
+    );
+  }
+
   const normalized: CandidateDossier = {
     schema_version: 1,
     cedula: { tipo: raw.cedula.tipo, numero },
@@ -323,11 +351,7 @@ function validatePayload(
       nocturno: false,
       viaja_otra_ciudad: false,
     },
-    cumplimiento: raw.cumplimiento ?? {
-      arl_activa: false,
-      eps_activa: false,
-      antecedentes_limpios: null,
-    },
+    cumplimiento,
     referencias_externas: raw.referencias_externas,
     dossier: dossierText,
     // Optional doc fields — undefined if not provided
@@ -339,9 +363,9 @@ function validatePayload(
     arl_doc_id: raw.arl_doc_id ?? undefined,
     eps_doc_id: raw.eps_doc_id ?? undefined,
     missing_optional: missingOptional,
-    tono_recommendation: raw.tono_recommendation,
-    tono_confidence: raw.tono_confidence,
-    tono_reasoning: reasoning,
+    tono_recommendation: finalRecommendation,
+    tono_confidence: finalConfidence,
+    tono_reasoning: finalReasoning,
     gaps,
   };
 

@@ -388,6 +388,10 @@ export async function handleMessage(
     if (existing?.tecnico_id) {
       turnSession.tecnico_id = existing.tecnico_id;
       currentCandidateState = existing.candidate_state as CandidateState;
+      // Gap A.4: propagate candidate_state into turnSession so the router's
+      // Rule 1c (approval-gated tools) can block read_pending_ots and
+      // create_postulacion for non-approved workers.
+      turnSession.candidate_state = existing.candidate_state ?? null;
       profileComplete = !!existing.profile_complete;
       if (currentCandidateState === "approved" && !profileComplete) {
         routingMode = "enrichment";

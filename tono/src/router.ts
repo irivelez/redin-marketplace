@@ -23,12 +23,19 @@ import type { ToolResult } from "@redin/tools";
 export interface TurnSession {
   /** Set after identify_user returns found=true, or after register_tecnico succeeds. */
   tecnico_id: string | null;
-  /** Increments each time the router dispatches a tool. Blocked at 3. */
+  /** Increments each time the router dispatches a tool. Blocked at 5. */
   toolCallCount: number;
+  /**
+   * Snapshot of `tecnicos_extended.candidate_state` at turn start. Pre-loaded
+   * by the agent before any tool fires. Used by Rule 1c to block job-search
+   * and apply tools for non-approved workers (Gap A.4). `null` means we
+   * haven't loaded it yet — Rule 1c treats null as "not approved" defensively.
+   */
+  candidate_state: string | null;
 }
 
 export function createTurnSession(): TurnSession {
-  return { tecnico_id: null, toolCallCount: 0 };
+  return { tecnico_id: null, toolCallCount: 0, candidate_state: null };
 }
 
 // ---------- Auth-gated tool set ----------
@@ -62,6 +69,26 @@ const TOOLS_WITH_TECNICO_ID_ARG = new Set([
   "submit_candidate_dossier",
   "mark_candidate_withdrawn",
   "complete_legacy_profile",
+]);
+
+// ---------- Approval-gated tools (Gap A.4 fix) ----------
+//
+// These tools surface or commit JOB-RELATED actions. They are only valid for
+// workers in candidate_state='approved'. For any other state (pending,
+// needs_call, screening, rejected, withdrawn, revoked) calling these tools
+// is a UX violation — it tells the worker they have a job to apply to
+// before HR has approved them, which contradicts pending_review's stop.
+//
+// Background: 2026-05-22 22:13 UTC live test showed the LLM calling
+// read_pending_ots in pending_review mode after Alberto pushed back with
+// frustration ("Ya te he dicho que estoy en popayan"). The model's
+// thinking-budget concluded "I should help him by showing what's there"
+// and produced a real OT in chat ("Plan de mantenimiento RACOL Popayán
+// — $1,259,100"), then contradicted itself the next turn ("no, aún no
+// estás autorizado"). Prompt rule was insufficient — needs router gate.
+const APPROVAL_GATED_TOOLS = new Set([
+  "read_pending_ots",   // showing jobs to non-approved = false expectation
+  "create_postulacion", // already gated tool-side, but block here too for clarity
 ]);
 
 // ---------- Tools always allowed before identification ----------
@@ -129,6 +156,37 @@ export function preDispatch(
         error:
           "Antes de esto necesito saber quién eres — dame tu cédula o el número de teléfono que usas aquí.",
         code: "not_identified",
+      },
+    };
+  }
+
+  // Rule 1c — approval-gated tools (Gap A.4).
+  //
+  // Job-search and apply tools only fire when the worker is candidate_state=
+  // 'approved'. Anything else (pending, needs_call, screening, rejected,
+  // withdrawn, revoked, or null) blocks. Prevents Toño from showing real OTs
+  // to non-approved workers — which produced the 2026-05-22 22:13 UTC test's
+  // contradiction (showed RACOL OT to Alberto in 'pending' state, then
+  // immediately said "no estás autorizado").
+  //
+  // The block returns a `next_action="explain_pending"` so the LLM tells
+  // the worker queue-status instead of trying again.
+  if (
+    APPROVAL_GATED_TOOLS.has(toolName) &&
+    session.candidate_state !== "approved"
+  ) {
+    return {
+      kind: "refusal",
+      result: {
+        ok: false,
+        error:
+          "El técnico no está aprobado — no le muestres trabajos ni lo postules. Dile que su perfil sigue en revisión.",
+        code: "not_approved_yet",
+        next_action: "explain_pending",
+        user_message_hint:
+          session.candidate_state === "pending" || session.candidate_state === "needs_call"
+            ? "Tu perfil está en revisión con el equipo. Apenas decidan, te aviso por aquí y te muestro los trabajos que hay para ti."
+            : "Tu perfil todavía no está autorizado para postularte. Si quieres avanzar, escríbenos y validamos.",
       },
     };
   }
