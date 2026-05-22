@@ -39,21 +39,63 @@ export class ModelUnavailableError extends Error {
 const log = createLogger("tono:llm");
 
 const MODEL = "claude-haiku-4-5";
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 45_000; // bumped from 30s — thinking turns can take longer
 const MAX_TOOL_ITERATIONS = 6;
+
+// Gap A.3 (2026-05-22): Extended thinking.
+//
+// When enabled, the model emits a hidden `thinking` content block before the
+// final answer (text + tool_use blocks). The deterministic gates (router,
+// refusal protocol, schema validation, auth gating) still see only the
+// non-thinking outputs — so we get smarter edge-case handling without
+// loosening any safety bar. The thinking block:
+//   - Never reaches WhatsApp (router/agent filters by content type)
+//   - IS billed as output tokens (~+1.5-3K tokens per turn, ~3-5x cost)
+//   - Requires temperature unset (Anthropic API constraint with thinking on)
+//   - Requires max_tokens > budget_tokens (we set max = budget + 2048 headroom)
+//
+// Off-switch: TONO_THINKING_ENABLED=0 reverts to single-pass Haiku.
+const THINKING_ENABLED = (() => {
+  const raw = process.env.TONO_THINKING_ENABLED;
+  if (raw === undefined || raw === null || raw === "") return true; // default ON
+  return !["0", "false", "no", "off"].includes(raw.toLowerCase());
+})();
+
+// Budget for the hidden reasoning. Min 1024 (Anthropic API constraint).
+// 2000 is the sweet spot for our screening-style decisions per
+// docs.anthropic.com/en/docs/build-with-claude/extended-thinking.
+const THINKING_BUDGET = (() => {
+  const raw = process.env.TONO_THINKING_BUDGET;
+  if (!raw) return 2000;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1024) return 2000;
+  return n;
+})();
+
 // 2026-05-16 hardening: raise default from 1024 → 2048. Santiago's chat hit
 // truncation mid-JSON when the model was wrongly serializing tool args as
 // natural-language text; 1024 cut it off at "fines_de_sem". Higher cap is the
 // safety net while the prompt fix forbids the JSON-as-text behavior. Env-
 // overridable so we can tune live without redeploy.
+//
+// Gap A.3: max_tokens must exceed thinking_budget (Anthropic constraint).
+// When thinking is on, default to budget + 2048 headroom for text + tool_use.
 const MAX_TOKENS = (() => {
   const raw = process.env.TONO_MAX_TOKENS;
-  if (!raw) return 2048;
+  const baseDefault = THINKING_ENABLED ? THINKING_BUDGET + 2048 : 2048;
+  if (!raw) return baseDefault;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 2048;
+  if (!Number.isFinite(n) || n <= 0) return baseDefault;
+  // Guard against an env override that's too low to coexist with thinking.
+  if (THINKING_ENABLED && n <= THINKING_BUDGET) return THINKING_BUDGET + 1024;
+  return n;
 })();
+
 // 2026-05-16: 0.3 was making Toño stilted/over-deterministic. 0.5 restores
 // some warmth without destabilizing tool-call discipline. Env-overridable.
+//
+// Gap A.3: Anthropic API rejects `temperature` when `thinking` is enabled.
+// When thinking is on, we omit the temperature parameter entirely.
 const TEMPERATURE = (() => {
   const raw = process.env.TONO_TEMPERATURE;
   if (!raw) return 0.5;
@@ -357,19 +399,29 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     const t0 = Date.now();
     let response: Anthropic.Message;
     try {
-      response = await createMessageWithRetry(
-        c,
-        {
-          model: MODEL,
-          max_tokens: MAX_TOKENS,
-          temperature: TEMPERATURE,
-          system: TONO_SYSTEM_PROMPT,
-          tools,
-          messages,
-        },
-        input.toolCtx,
-        TIMEOUT_MS
-      );
+      // Gap A.3: build params conditionally. With thinking enabled,
+      // temperature must be omitted (API rejects the combination).
+      const params: Anthropic.MessageCreateParamsNonStreaming = THINKING_ENABLED
+        ? {
+            model: MODEL,
+            max_tokens: MAX_TOKENS,
+            system: TONO_SYSTEM_PROMPT,
+            tools,
+            messages,
+            thinking: {
+              type: "enabled",
+              budget_tokens: THINKING_BUDGET,
+            },
+          }
+        : {
+            model: MODEL,
+            max_tokens: MAX_TOKENS,
+            temperature: TEMPERATURE,
+            system: TONO_SYSTEM_PROMPT,
+            tools,
+            messages,
+          };
+      response = await createMessageWithRetry(c, params, input.toolCtx, TIMEOUT_MS);
     } catch (e) {
       const latency_ms = Date.now() - t0;
       const error_message = e instanceof Error ? e.message : String(e);
