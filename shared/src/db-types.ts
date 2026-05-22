@@ -68,7 +68,11 @@ export type DocumentoTipo =
   // Story 17: optional dossier document types
   | "cert_estudios"
   | "cert_trabajos_previos"
-  | "evidencia_arl";
+  | "evidencia_arl"
+  // Gap A.4 (Irina 2026-05-22): EPS evidence now mandatory alongside ARL.
+  // upload_documento.ts already accepts this tipo at runtime; this is a
+  // missing line in the shared type that broke the TS build.
+  | "evidencia_eps";
 export type EventoType =
   | "tecnico_registered"
   | "postulacion_created"

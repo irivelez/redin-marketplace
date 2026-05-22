@@ -269,6 +269,94 @@ export async function submitDecision(formData: FormData): Promise<void> {
 // appendHrNote — append-only note thread per worker
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// requestDocument — Gap A.5
+//
+// HR-triggered WhatsApp request for a specific evidence doc (ARL/EPS).
+// Mirrors the Telegram-out / outbound_messages pattern used by submitDecision:
+// no direct WA send (dashboard doesn't own the Baileys socket); enqueues a
+// row that tono-mp's drainer ships within ~5s.
+//
+// Idempotency: a single row per click — HR can click twice if they want to
+// re-send. The proactive cron (Gap A.6) has separate spacing logic; HR
+// requests don't count against the 2-max cap because they're intentional.
+// ---------------------------------------------------------------------------
+
+const REQUESTABLE_TIPOS = new Set([
+  "evidencia_arl",
+  "evidencia_eps",
+  "cedula",
+  "cert_estudios",
+  "cert_trabajos_previos",
+]);
+
+const TIPO_LABELS: Record<string, string> = {
+  evidencia_arl: "ARL (carné o constancia)",
+  evidencia_eps: "EPS (carné o constancia)",
+  cedula: "cédula (foto del documento)",
+  cert_estudios: "certificado de estudios",
+  cert_trabajos_previos: "certificado de trabajos previos",
+};
+
+export async function requestDocument(formData: FormData): Promise<void> {
+  const auth = serverClientBoundToCookies();
+  const { data: userData } = await auth.auth.getUser();
+  if (!userData.user) redirect("/login");
+  const hrEmail = userData.user.email ?? userData.user.id;
+
+  const tecnicoId = formData.get("tecnico_id");
+  const tipo = formData.get("tipo");
+  if (typeof tecnicoId !== "string" || !tecnicoId.trim()) return;
+  if (typeof tipo !== "string" || !REQUESTABLE_TIPOS.has(tipo)) {
+    console.error("requestDocument: invalid tipo", { tipo });
+    return;
+  }
+
+  const supa = serviceClient();
+  const { data: tec } = await supa
+    .from("tecnicos_extended")
+    .select("phone, contact_phone, nombre")
+    .eq("tecnico_id", tecnicoId)
+    .maybeSingle();
+  if (!tec) {
+    console.error("requestDocument: worker not found", { tecnicoId });
+    return;
+  }
+  const phone = tec.phone ?? tec.contact_phone;
+  if (!phone) {
+    console.error("requestDocument: no phone on worker", { tecnicoId });
+    return;
+  }
+
+  const label = TIPO_LABELS[tipo] ?? tipo;
+  const nombre = (tec.nombre ?? "").split(" ")[0] || "compa";
+  const body = `Hola ${nombre}, soy del equipo de Redin. Para terminar de validar tu perfil necesitamos tu evidencia de ${label}. ¿Nos la puedes pasar por aquí (foto o PDF) cuando puedas? Gracias.`;
+
+  await enqueueWhatsApp(supa, {
+    phone,
+    body,
+    meta: {
+      kind: "hr_doc_request",
+      tecnico_id: tecnicoId,
+      tipo,
+      requested_by: hrEmail,
+    },
+  });
+
+  // Audit row so the timeline shows when HR last chased this doc.
+  await supa.from("eventos").insert({
+    type: "hr_doc_request",
+    entity_id: tecnicoId,
+    actor: `hr:${hrEmail}`,
+    meta: {
+      tipo,
+      phone,
+    },
+  });
+
+  revalidatePath(`/hr/tecnicos/${tecnicoId}`);
+}
+
 export async function appendHrNote(formData: FormData): Promise<void> {
   const auth = serverClientBoundToCookies();
   const { data: userData } = await auth.auth.getUser();

@@ -14,6 +14,7 @@ import { AppSheetReadClient } from "./appsheet";
 import { SyncWorker } from "./mirror";
 import { tickOnce, tickOtAlcanceOutbox } from "./projector";
 import { TelegramBotSink } from "./telegram";
+import { runDocFollowupTick } from "./proactive-followup";
 
 const log = createLogger("sync:runner");
 
@@ -89,10 +90,39 @@ async function main() {
     }
   }, 60_000);
 
+  // Gap A.6 — Proactive ARL/EPS doc follow-up at 10:00 COT (15:00 UTC) daily.
+  // Sends max 2 reminders per worker; 24h minimum spacing enforced inside the tick.
+  cron.schedule(
+    "0 10 * * *",
+    async () => {
+      try {
+        const results = await runDocFollowupTick(supa);
+        const sent = results.filter((r) => r.sent).length;
+        log.info("doc-followup cron ok", {
+          candidates: results.length,
+          sent,
+        });
+      } catch (e) {
+        log.error("doc-followup cron failed", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    },
+    { timezone: "America/Bogota" }
+  );
+
   process.on("SIGUSR1", () => {
     log.info("on-demand refresh signaled");
     worker.refreshAll().catch((e) =>
       log.error("on-demand refresh failed", { error: String(e) })
+    );
+  });
+
+  // SIGUSR2 → on-demand doc-followup tick (dev convenience for ops testing).
+  process.on("SIGUSR2", () => {
+    log.info("on-demand doc-followup signaled");
+    runDocFollowupTick(supa).catch((e) =>
+      log.error("on-demand doc-followup failed", { error: String(e) })
     );
   });
 }

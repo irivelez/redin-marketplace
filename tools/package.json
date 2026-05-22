@@ -24,7 +24,8 @@
     "./legacy-name-match": "./src/legacy-name-match.ts",
     "./schemas": "./src/schemas.ts",
     "./manos": "./src/manos/index.ts",
-    "./recommend-shortlist-candidate": "./src/recommend-shortlist-candidate.ts"
+    "./recommend-shortlist-candidate": "./src/recommend-shortlist-candidate.ts",
+    "./missing-docs": "./src/missing-docs.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

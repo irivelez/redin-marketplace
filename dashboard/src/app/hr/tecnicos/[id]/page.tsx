@@ -6,12 +6,13 @@
 //   - Add-note form for the hr_notes thread
 
 import { serverClientBoundToCookies, serviceClient } from "@/lib/supabase-server";
-import { submitDecision, appendHrNote } from "@/lib/decisions";
+import { submitDecision, appendHrNote, requestDocument } from "@/lib/decisions";
 import { otTitle } from "@/lib/ot-display";
 import type { CandidateState, TonoRecommendation, HrAction } from "@redin/shared";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { phoneDisplay } from "@/lib/phone-display";
+import { getMissingDocsForWorker } from "@redin/tools/missing-docs";
 
 export const dynamic = "force-dynamic";
 
@@ -248,6 +249,27 @@ export default async function TecnicoDetailPage({
   const canReopen =
     tec.candidate_state === "rejected" || tec.candidate_state === "withdrawn";
 
+  // Gap A.5 — Documentos pendientes (ARL/EPS evidence). Surfaces the
+  // declared-but-not-uploaded mandatory docs + "Pedir por WhatsApp" buttons.
+  const missingDocs = await getMissingDocsForWorker(supa, tecnicoId);
+
+  // Last HR doc-request events for "ya enviado hace X" badges next to each
+  // pedido button. Indexed by tipo.
+  const lastHrRequestByTipo = new Map<string, string>();
+  for (const e of events ?? []) {
+    if (e.type !== "hr_doc_request") continue;
+    const meta = e.meta as { tipo?: string } | null;
+    if (!meta?.tipo) continue;
+    if (!lastHrRequestByTipo.has(meta.tipo)) {
+      lastHrRequestByTipo.set(meta.tipo, e.created_at);
+    }
+  }
+  // Same for Toño proactive follow-ups (Gap A.6) — show HR what the
+  // cron has been doing on its own.
+  const tonoFollowupCount = (events ?? []).filter(
+    (e) => e.type === "tono_doc_followup"
+  ).length;
+
   return (
     <div className="space-y-6">
       <Link href="/hr/tecnicos" className="text-sm text-slate-500 hover:text-slate-700">
@@ -345,6 +367,49 @@ export default async function TecnicoDetailPage({
           </div>
         )}
       </div>
+
+      {/* Documentos pendientes — Gap A.5
+          Surfaces declared-but-not-uploaded mandatory docs (ARL + EPS) so HR
+          can chase via WhatsApp with one click. Proactive Toño cron also
+          chases up to 2x (Gap A.6); the followup count is shown so HR knows
+          whether the worker has been bothered enough. */}
+      {missingDocs && missingDocs.missing.length > 0 && (
+        <div className="card p-4 border-l-4 border-amber-400 bg-amber-50">
+          <div className="text-xs uppercase tracking-wide text-amber-700 mb-2">
+            Documentos pendientes — perfil incompleto sin esto
+          </div>
+          <div className="text-sm text-slate-700 mb-3">
+            El técnico declaró tener {missingDocs.missing.map((m) => m.label.split(" ")[0]).join(" y ")} activa(s)
+            pero no ha mandado evidencia. Para aprobar necesitamos foto/constancia.
+            {tonoFollowupCount > 0 && (
+              <span className="ml-1 text-slate-500">
+                · Toño ya hizo seguimiento {tonoFollowupCount} {tonoFollowupCount === 1 ? "vez" : "veces"} (max 2).
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {missingDocs.missing.map((doc) => {
+              const lastRequest = lastHrRequestByTipo.get(doc.tipo);
+              return (
+                <form key={doc.tipo} action={requestDocument} className="inline-block">
+                  <input type="hidden" name="tecnico_id" value={tec.tecnico_id} />
+                  <input type="hidden" name="tipo" value={doc.tipo} />
+                  <button
+                    type="submit"
+                    className="text-sm bg-amber-500 hover:bg-amber-600 text-white rounded-md px-3 py-1.5 inline-flex items-center gap-2"
+                    title={lastRequest ? `Última solicitud HR: ${fmt(lastRequest)}` : "Aún no se ha pedido por HR"}
+                  >
+                    Pedir {doc.label.split(" ")[0]} por WhatsApp
+                    {lastRequest && (
+                      <span className="text-amber-100 text-xs">· ya enviado</span>
+                    )}
+                  </button>
+                </form>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Add HR note */}
       <div className="card p-3">
