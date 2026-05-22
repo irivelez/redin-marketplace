@@ -165,7 +165,10 @@ export class WhatsAppClient {
 
     // ---- Document message: polite refusal ----
     if (msgContent.documentMessage || msgContent.documentWithCaptionMessage) {
-      await this.sendText(jid, "Por ahora solo manejo fotos y notas de voz — documentos no. Manda las fotos y cuéntame el alcance de voz o texto.");
+      await this.sendText(
+        jid,
+        "Por ahora solo proceso fotos y notas de voz. Si tienes el alcance en Excel/PDF/Word, copia los datos clave (cantidades, materiales, condiciones, valor estimado) y mándamelos por texto o voz — yo armo el alcance con eso."
+      );
       return;
     }
 
