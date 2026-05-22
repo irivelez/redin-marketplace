@@ -7,7 +7,7 @@
 
 import { serverClientBoundToCookies, serviceClient } from "@/lib/supabase-server";
 import { rankPostulaciones } from "@/lib/ranking";
-import { enqueueWhatsApp, tecnicoNotificationContext } from "@/lib/notify";
+import { enqueueWhatsApp, enqueueWhatsAppDocument, tecnicoNotificationContext } from "@/lib/notify";
 import { otTitle, tecnicoLabel } from "@/lib/ot-display";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
@@ -201,13 +201,45 @@ async function decide(formData: FormData) {
         post.tecnico_id,
         otId
       );
+      // Gap A: attach the alcance PDF so the worker can read the scope before
+      // accepting. Worker's "acepto" reply is captured pre-LLM in
+      // tono/src/offer-replies.ts (extended to recognize preselection-stage
+      // acceptances, not just HR-push ot_offers).
+      let alcancePdfPath: string | null = null;
+      try {
+        const { data: ext } = await supa
+          .from("ots_extended")
+          .select("alcance_pdf_path")
+          .eq("ot_row_id", otId)
+          .maybeSingle();
+        alcancePdfPath = ext?.alcance_pdf_path ?? null;
+      } catch {
+        alcancePdfPath = null;
+      }
       if (phone) {
         const trabajo = descripcion ?? "el trabajo";
+        const bodyText = alcancePdfPath
+          ? `Buenas — quedaste preseleccionado para "${trabajo}". Te paso el alcance del trabajo en el documento adjunto. Revísalo bien: si te interesa, responde "acepto"; si no, responde "paso".`
+          : `Buenas — quedaste preseleccionado para "${trabajo}". El cliente revisa tu perfil; te aviso apenas decidan.`;
         await enqueueWhatsApp(supa, {
           phone,
-          body: `Buenas — quedaste preseleccionado para "${trabajo}". El cliente revisa tu perfil; te aviso apenas decidan.`,
+          body: bodyText,
           meta: { kind: "preseleccionado", postulacion_id: postulacionId, ot_id: otId },
         });
+        if (alcancePdfPath) {
+          await enqueueWhatsAppDocument(supa, {
+            phone,
+            body: `Alcance del trabajo — OT ${otId.slice(0, 8)}`,
+            attachment_path: alcancePdfPath,
+            attachment_bucket: "alcance-photos",
+            attachment_filename: `Alcance_OT_${otId.slice(0, 8)}.pdf`,
+            meta: {
+              kind: "preseleccionado_alcance",
+              postulacion_id: postulacionId,
+              ot_id: otId,
+            },
+          });
+        }
       }
     }
   }
