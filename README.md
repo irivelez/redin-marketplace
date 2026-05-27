@@ -39,7 +39,7 @@ All credentials live in `marketplace/.env.local` (gitignored). Required:
 | `SUPABASE_MANAGEMENT_TOKEN` | `sbp_…` (for Management API migrations) |
 | `SUPABASE_PROJECT_REF` | `foerbjhnwbxfauajkbld` |
 | `DATABASE_URL` | Direct Postgres connection (optional; used only if we add CLI flows) |
-| `WA_NUMBER` | `+573105751757` (Toño's provisioned WhatsApp number — Colombian) |
+| `WA_NUMBER` | `+573224347117` (Toño's provisioned WhatsApp number — Colombian) |
 | `APPSHEET_APP_ID` | Copied from `agent/.env` — Jose's prod AppSheet |
 | `APPSHEET_ACCESS_KEY` | Copied from `agent/.env` |
 | `GEMINI_API_KEY` | Copied from `agent/.env` |
