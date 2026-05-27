@@ -723,6 +723,10 @@ export interface TurnRow {
     | Array<{ stage: "llm" | "router" | "tool" | "cost"; code: string; message?: string }>
     | null;
 
+  grounding_violations:
+    | Array<{ token: string; kind: "number" | "proper_noun" | "placa" | "country_name"; reason: string }>
+    | null;
+
   escalated: boolean;
   refused: boolean;
   cost_killed: boolean;

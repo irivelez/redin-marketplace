@@ -330,6 +330,9 @@ export type Database = {
       }
       documentos: {
         Row: {
+          classification_jsonb: Json | null
+          classified_at: string | null
+          classifier_model: string | null
           id: string
           storage_path: string
           tecnico_id: string
@@ -339,6 +342,9 @@ export type Database = {
           validated_by: string | null
         }
         Insert: {
+          classification_jsonb?: Json | null
+          classified_at?: string | null
+          classifier_model?: string | null
           id?: string
           storage_path: string
           tecnico_id: string
@@ -348,6 +354,9 @@ export type Database = {
           validated_by?: string | null
         }
         Update: {
+          classification_jsonb?: Json | null
+          classified_at?: string | null
+          classifier_model?: string | null
           id?: string
           storage_path?: string
           tecnico_id?: string
@@ -1014,6 +1023,7 @@ export type Database = {
           errors: Json | null
           escalated: boolean
           finished_at: string | null
+          grounding_violations: Json | null
           id: string
           inbound_text: string
           latency_ms: number | null
@@ -1038,6 +1048,7 @@ export type Database = {
           errors?: Json | null
           escalated?: boolean
           finished_at?: string | null
+          grounding_violations?: Json | null
           id?: string
           inbound_text: string
           latency_ms?: number | null
@@ -1062,6 +1073,7 @@ export type Database = {
           errors?: Json | null
           escalated?: boolean
           finished_at?: string | null
+          grounding_violations?: Json | null
           id?: string
           inbound_text?: string
           latency_ms?: number | null
