@@ -53,6 +53,7 @@ export interface WhatsAppOptions {
 export class WhatsAppClient {
   private sock: WASocket | null = null;
   private reconnecting = false;
+  private seenMessageIds = new Set<string>();
 
   constructor(private opts: WhatsAppOptions) {
     fs.mkdirSync(opts.authDir, { recursive: true });
@@ -153,7 +154,38 @@ export class WhatsAppClient {
 
   private async handleIncoming(msg: WAMessage): Promise<void> {
     if (msg.key.fromMe) return;
+
+    // LID-mode self-loop guard (added 2026-05-26, mirrors tono/whatsapp.ts).
+    // WhatsApp history-sync can replay the bot's OWN outbound back to Baileys
+    // with key.fromMe inconsistent on LID-mode accounts. Without this check,
+    // phoneFromJid extracts the bot's own LID as a "user phone" and the bot
+    // enters an infinite self-reply loop. See tono/src/whatsapp.ts for incident.
+    const remoteJid = msg.key.remoteJid ?? "";
+    const user = this.sock?.user as { id?: string; lid?: string } | undefined;
+    const stripIdDeviceAndDomain = (s: string): string =>
+      (s.split(":")[0] ?? "").split("@")[0] ?? "";
+    const remoteBase = stripIdDeviceAndDomain(remoteJid);
+    if (remoteBase) {
+      const ownIds: string[] = [];
+      if (user?.id) ownIds.push(user.id);
+      if (user?.lid) ownIds.push(user.lid);
+      if (ownIds.some((o) => stripIdDeviceAndDomain(o) === remoteBase)) {
+        log.warn("dropped inbound from own identity (LID self-loop guard)", { remoteJid });
+        return;
+      }
+    }
+
     if (!msg.message) return;
+
+    const msgId = msg.key.id;
+    if (msgId) {
+      if (this.seenMessageIds.has(msgId)) return;
+      this.seenMessageIds.add(msgId);
+      if (this.seenMessageIds.size > 500) {
+        const firstHalf = Array.from(this.seenMessageIds).slice(0, 250);
+        for (const id of firstHalf) this.seenMessageIds.delete(id);
+      }
+    }
 
     const jid = msg.key.remoteJid ?? "";
     if (!jid || jid.endsWith("@g.us")) return; // skip groups
@@ -163,12 +195,27 @@ export class WhatsAppClient {
 
     const msgContent = msg.message;
 
-    // ---- Document message: polite refusal ----
+    // ---- Document message: polite refusal + event log ----
     if (msgContent.documentMessage || msgContent.documentWithCaptionMessage) {
+      const docMsg =
+        msgContent.documentMessage ?? msgContent.documentWithCaptionMessage?.message?.documentMessage;
+      const mimeType = docMsg?.mimetype ?? "unknown";
+      const filename = docMsg?.fileName ?? "unknown";
       await this.sendText(
         jid,
-        "Por ahora solo proceso fotos y notas de voz. Si tienes el alcance en Excel/PDF/Word, copia los datos clave (cantidades, materiales, condiciones, valor estimado) y mándamelos por texto o voz — yo armo el alcance con eso."
+        "Por ahora no proceso archivos Excel ni PDF en WhatsApp. Si tienes los datos en una hoja, mándamelos por voz o foto — yo armo el alcance contigo. (Excel sale en versión próxima)"
       );
+      // Fire-and-forget — rejection logging must never block the response.
+      this.opts.supabase.from("eventos").insert({
+        type: "manos_unsupported_doc_type",
+        entity_id: null,
+        actor: `arquitecto:${phone}`,
+        meta: { mime_type: mimeType, filename, phone },
+      }).then(({ error }) => {
+        if (error) {
+          log.warn("failed to log manos_unsupported_doc_type event", { phone, error: error.message });
+        }
+      });
       return;
     }
 

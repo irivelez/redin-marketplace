@@ -65,6 +65,7 @@ export interface WhatsAppOptions {
 export class WhatsAppClient {
   private sock: WASocket | null = null;
   private reconnecting = false;
+  private seenMessageIds = new Set<string>();
 
   constructor(private opts: WhatsAppOptions) {
     fs.mkdirSync(opts.authDir, { recursive: true });
@@ -170,7 +171,46 @@ export class WhatsAppClient {
 
   private async handleIncoming(msg: WAMessage): Promise<void> {
     if (msg.key.fromMe) return;
+
+    // LID-mode self-loop guard (added 2026-05-26 after credit-exhaustion incident).
+    // WhatsApp history-sync can replay the bot's OWN outbound messages back to
+    // Baileys with key.fromMe inconsistently set on accounts that use LID (Linked
+    // Identity). Without this check, phoneFromJid extracts the bot's own LID as a
+    // "user phone" and the bot enters an infinite self-reply loop. Compare
+    // remoteJid against the socket's own id + lid, stripping device suffix.
+    const remoteJid = msg.key.remoteJid ?? "";
+    const user = this.sock?.user as { id?: string; lid?: string } | undefined;
+    const stripIdDeviceAndDomain = (s: string): string =>
+      (s.split(":")[0] ?? "").split("@")[0] ?? "";
+    const remoteBase = stripIdDeviceAndDomain(remoteJid);
+    if (remoteBase) {
+      const ownIds: string[] = [];
+      if (user?.id) ownIds.push(user.id);
+      if (user?.lid) ownIds.push(user.lid);
+      if (ownIds.some((o) => stripIdDeviceAndDomain(o) === remoteBase)) {
+        log.warn("dropped inbound from own identity (LID self-loop guard)", { remoteJid });
+        return;
+      }
+    }
+
     if (!msg.message) return;
+
+    // Inbound dedup. Baileys redelivers the same message on network glitches
+    // (m.type='append' after a missed 'notify', or a remote retry from
+    // WhatsApp). Without this guard the runner processes the same inbound
+    // twice in a row, and the LLM emits a near-identical duplicate reply —
+    // observed in Carlos's 2026-05-25 screening where the same Toño message
+    // arrived twice 1 second apart. Set is bounded to avoid unbounded growth.
+    const msgId = msg.key.id;
+    if (msgId) {
+      if (this.seenMessageIds.has(msgId)) return;
+      this.seenMessageIds.add(msgId);
+      if (this.seenMessageIds.size > 500) {
+        const firstHalf = Array.from(this.seenMessageIds).slice(0, 250);
+        for (const id of firstHalf) this.seenMessageIds.delete(id);
+      }
+    }
+
     const jid = msg.key.remoteJid ?? "";
     if (!jid || jid.endsWith("@g.us")) return; // skip groups in v1
     const phone = phoneFromJid(jid);
