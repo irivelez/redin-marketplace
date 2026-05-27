@@ -45,6 +45,9 @@ import {
 } from "./router";
 import { tryHandleCustomerRatingReply } from "./customer-ratings";
 import { tryMatchOfferReply } from "./offer-replies";
+import { tryMatchApprovalPushReply } from "./approval-push-replies";
+import { runIdentityGate, formatIdentityBlock, type IdentityContext } from "./identity-gate";
+import { checkGrounding, type GroundedFacts } from "./grounding-gate";
 
 const log = createLogger("tono:agent");
 
@@ -371,6 +374,29 @@ export async function handleMessage(
     };
   }
 
+  // Pre-LLM short-circuit #3: HR approval push followed by a worker reply
+  // like "2" or "el primero". fireApprovalPush enqueues a numbered menu of
+  // OTs with ot_row_ids[] in meta; this handler resolves the index to a
+  // row_id and calls create_postulacion directly. Zero LLM cost. Fixes the
+  // May25-camilo2 "¿Qué significa '2'?" regression where the LLM had no
+  // grounded context for the push.
+  const approvalPushReply = await tryMatchApprovalPushReply({
+    phone,
+    text,
+    supabase: baseCtx.supabase,
+    log: (lvl, m, meta) =>
+      log[lvl](m, meta as Record<string, unknown> | undefined),
+  });
+  if (approvalPushReply.handled) {
+    log.info("approval-push: handled pre-LLM", { phone });
+    return {
+      reply: approvalPushReply.reply,
+      session_id: "",
+      tool_calls: [],
+      tool_calls_full: [],
+    };
+  }
+
   const sessions = new SessionStore(baseCtx.supabase);
   const session = await sessions.getOrCreate(phone, input.channel);
   const toolCtx: ToolContext = { ...baseCtx, session_id: session.id };
@@ -382,6 +408,17 @@ export async function handleMessage(
     text_len: text.length,
   });
 
+  // ── A1: Pre-LLM identity gate ──────────────────────────────────────────────
+  // Resolve identity from phone BEFORE the routing block. This eliminates
+  // cross-session amnesia (Bug 4): the model sees a [session_identity] block
+  // with the worker's known facts and MUST NOT re-ask cédula/nombre/ciudad
+  // that are already on file. runIdentityGate fails open (returns null) on
+  // DB error, preserving all pre-existing behaviour.
+  const identityCtx: IdentityContext | null = await runIdentityGate(
+    baseCtx.supabase,
+    phone
+  );
+
   // Three-case routing — read the worker's row and decide which mode applies.
   // CASE A (enrichment): approved + profile_complete=false -> Toño collects
   //                      missing fields via complete_legacy_profile.
@@ -389,33 +426,32 @@ export async function handleMessage(
   //                      contract flow.
   // CASE C (returning):  approved + profile_complete=true -> minimal greeting,
   //                      future job-application flows live here.
+  //
+  // When identityCtx is available, we skip the separate DB lookup and reuse
+  // the data already fetched by the identity gate.
   const turnSession: TurnSession = createTurnSession();
+  turnSession.session_phone = phone;
   let routingMode: RoutingMode = "screening";
   let currentCandidateState: CandidateState | null = null;
   let profileComplete = false;
   let nombreFromRow: string | null = null;
   let ciudadFromRow: string | null = null;
   {
-    const { data: existing } = await baseCtx.supabase
-      .from("tecnicos_extended")
-      .select("tecnico_id, candidate_state, profile_complete")
-      .eq("phone", phone)
-      .maybeSingle();
-    if (existing?.tecnico_id) {
-      turnSession.tecnico_id = existing.tecnico_id;
-      currentCandidateState = existing.candidate_state as CandidateState;
-      // Gap A.4: propagate candidate_state into turnSession so the router's
-      // Rule 1c (approval-gated tools) can block read_pending_ots and
-      // create_postulacion for non-approved workers.
-      turnSession.candidate_state = existing.candidate_state ?? null;
-      profileComplete = !!existing.profile_complete;
-      if (currentCandidateState === "approved" && !profileComplete) {
+    if (identityCtx) {
+      // Identity gate already fetched the row — reuse to avoid a second query.
+      turnSession.tecnico_id = identityCtx.tecnico_id;
+      currentCandidateState = identityCtx.candidate_state as CandidateState;
+      turnSession.candidate_state = identityCtx.candidate_state;
+      profileComplete = !identityCtx.is_legacy_incomplete &&
+        identityCtx.candidate_state === "approved";
+      if (identityCtx.is_legacy_incomplete) {
+        // CASE A: approved + profile_complete=false → enrichment mode ALWAYS.
         routingMode = "enrichment";
-      } else if (currentCandidateState === "approved" && profileComplete) {
+      } else if (identityCtx.candidate_state === "approved") {
         routingMode = "returning";
       } else if (
-        currentCandidateState === "pending" ||
-        currentCandidateState === "needs_call"
+        identityCtx.candidate_state === "pending" ||
+        identityCtx.candidate_state === "needs_call"
       ) {
         // Worker already submitted a dossier and is waiting for HR. Do NOT
         // re-run screening — that's why they were getting re-asked cédula,
@@ -428,11 +464,49 @@ export async function handleMessage(
       } else {
         routingMode = "screening";
       }
-      nombreFromRow = await loadDisplayName(baseCtx.supabase, existing.tecnico_id);
-      // Pre-load ciudad only for CASO C — keeps the lookup cost-aware and lets
-      // the proactive opener call read_pending_ots without a round-trip.
+      // Use nombre from identity gate; fall back to loadDisplayName only if
+      // identity gate didn't have it (legacy rows without nombre column set).
+      nombreFromRow = identityCtx.nombre
+        ?? await loadDisplayName(baseCtx.supabase, identityCtx.tecnico_id);
+      // Pre-load ciudad only for CASO C — keeps the lookup cost-aware.
       if (routingMode === "returning") {
-        ciudadFromRow = await loadCiudad(baseCtx.supabase, existing.tecnico_id);
+        ciudadFromRow = identityCtx.ciudad_base
+          ?? await loadCiudad(baseCtx.supabase, identityCtx.tecnico_id);
+      }
+    } else {
+      // No identity gate result → either new caller or DB error. Fall back to
+      // the original separate lookup to keep existing behaviour for new callers.
+      const { data: existing } = await baseCtx.supabase
+        .from("tecnicos_extended")
+        .select("tecnico_id, candidate_state, profile_complete")
+        .eq("phone", phone)
+        .maybeSingle();
+      if (existing?.tecnico_id) {
+        turnSession.tecnico_id = existing.tecnico_id;
+        currentCandidateState = existing.candidate_state as CandidateState;
+        // Gap A.4: propagate candidate_state into turnSession so the router's
+        // Rule 1c (approval-gated tools) can block read_pending_ots and
+        // create_postulacion for non-approved workers.
+        turnSession.candidate_state = existing.candidate_state ?? null;
+        profileComplete = !!existing.profile_complete;
+        if (currentCandidateState === "approved" && !profileComplete) {
+          routingMode = "enrichment";
+        } else if (currentCandidateState === "approved" && profileComplete) {
+          routingMode = "returning";
+        } else if (
+          currentCandidateState === "pending" ||
+          currentCandidateState === "needs_call"
+        ) {
+          routingMode = "pending_review";
+        } else {
+          routingMode = "screening";
+        }
+        nombreFromRow = await loadDisplayName(baseCtx.supabase, existing.tecnico_id);
+        // Pre-load ciudad only for CASO C — keeps the lookup cost-aware and lets
+        // the proactive opener call read_pending_ots without a round-trip.
+        if (routingMode === "returning") {
+          ciudadFromRow = await loadCiudad(baseCtx.supabase, existing.tecnico_id);
+        }
       }
     }
   }
@@ -559,12 +633,6 @@ export async function handleMessage(
     return postDispatch(result);
   };
 
-  // Inject session context. mode + name guide Toño's three-case routing.
-  // 2026-05-16: surface tecnico_id explicitly. Santiago's chat showed the
-  // model looping for ~6 turns asking itself "where is the tecnico_id?"
-  // because it was never visible in context. The router rewrites the arg
-  // server-side anyway (router.ts Rule 2), but the LLM needs to *see* the
-  // id to stop second-guessing.
   const contextLines = [`[session_phone: ${phone}]`];
   const tecnicoIdForContext = turnSession.tecnico_id ?? "unknown";
   if (currentCandidateState) {
@@ -578,6 +646,10 @@ export async function handleMessage(
   }
   if (nombreFromRow) contextLines.push(`[session_name: ${nombreFromRow}]`);
   if (ciudadFromRow) contextLines.push(`[session_ciudad: ${ciudadFromRow}]`);
+  // A1: inject identity block so model never re-asks known facts (cross-session amnesia fix).
+  if (identityCtx) {
+    contextLines.push(formatIdentityBlock(identityCtx));
+  }
 
   // Gap A.5/A.6 follow-up — when the inbound WA carries media, inject a
   // sentinel so the LLM can call upload_documento with the right tipo.
@@ -679,16 +751,92 @@ export async function handleMessage(
         tools: turn.toolCallsMade.map((tc) => tc.name),
       });
     } else {
-      reply = "Un momento, déjame revisar eso con el equipo y te respondo.";
+      // A4: no tool was even attempted (or all tools failed). "Perfecto, anotado"
+      // would be a false acknowledgment. Use a neutral signal-of-work reply and
+      // emit an evento so this pathology is traceable in the events log.
+      reply = "Un momento, déjame mirar eso.";
       log.warn("substituted empty-text reply (no successful tool)", {
         phone,
         session_id: session.id,
+      });
+      // Fire-and-forget — non-fatal if this fails.
+      recordEvent(toolCtx, {
+        type: "empty_reply_no_tools",
+        entity_id: turnSession.tecnico_id ?? null,
+        actor: `tecnico:${phone}`,
+        meta: {
+          phone,
+          session_id: session.id,
+          inbound_text: text.slice(0, 200),
+          tool_calls_attempted: turn?.toolCallsMade.length ?? 0,
+        },
+      }).catch((e: unknown) => {
+        log.warn("empty_reply_no_tools event log failed (non-fatal)", {
+          error: e instanceof Error ? e.message : String(e),
+        });
       });
     }
     errorsCollected.push({
       stage: "llm",
       code: "empty_reply_substituted",
     });
+  }
+
+  // A2: Post-LLM grounding gate (log-only mode).
+  // Runs BEFORE persisting outbound_text. If TONO_GROUNDING_ENFORCE=true and
+  // violations are found, the reply is replaced with a safe fallback and an
+  // evento is emitted. Otherwise violations are recorded for observability only.
+  let groundingViolations: import("./grounding-gate").GroundingViolation[] | null = null;
+  if (!modelUnavailable && reply.trim() !== "") {
+    const toolPayloads: string[] = (turn?.toolCallsMade ?? []).map((tc) =>
+      typeof tc.result === "object" && tc.result !== null
+        ? JSON.stringify(tc.result)
+        : String(tc.result)
+    );
+    const groundedFacts: GroundedFacts = {
+      identity_nombre: identityCtx?.nombre ?? null,
+      identity_cedula: identityCtx?.cedula ?? null,
+      identity_ciudad: identityCtx?.ciudad_base ?? ciudadFromRow,
+      identity_categorias: identityCtx?.categorias ?? [],
+      user_message: text,
+      tool_payloads: toolPayloads,
+      phone,
+    };
+    const groundingResult = checkGrounding(reply, groundedFacts);
+    if (!groundingResult.ok) {
+      groundingViolations = groundingResult.violations;
+      log.warn("grounding violations detected", {
+        phone,
+        session_id: session.id,
+        violations: groundingResult.violations,
+      });
+      const enforce = (process.env.TONO_GROUNDING_ENFORCE ?? "").toLowerCase();
+      const enforcing = enforce === "1" || enforce === "true" || enforce === "yes";
+      if (enforcing) {
+        reply = "Un momento, déjame revisar eso para confirmártelo bien.";
+        recordEvent(toolCtx, {
+          type: "grounding_blocked",
+          entity_id: turnSession.tecnico_id ?? null,
+          actor: `tecnico:${phone}`,
+          meta: { violations: groundingResult.violations, phone, session_id: session.id },
+        }).catch((e: unknown) => {
+          log.warn("grounding_blocked event log failed (non-fatal)", {
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
+      } else {
+        recordEvent(toolCtx, {
+          type: "grounding_violation_logged",
+          entity_id: turnSession.tecnico_id ?? null,
+          actor: `tecnico:${phone}`,
+          meta: { violations: groundingResult.violations, phone, session_id: session.id },
+        }).catch((e: unknown) => {
+          log.warn("grounding_violation_logged event log failed (non-fatal)", {
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
+      }
+    }
   }
 
   // Persist tool calls + responses + final reply BEFORE writing the turn row,
@@ -793,6 +941,7 @@ export async function handleMessage(
       llm_iterations: turn?.iterations ?? null,
       latency_ms: Date.now() - startedAt,
       errors: errorsCollected.length > 0 ? errorsCollected : null,
+      grounding_violations: groundingViolations ?? null,
       escalated,
       refused,
       cost_killed: false,

@@ -34,7 +34,7 @@ export const TOOL_DECLARATIONS = [
   {
     name: "register_tecnico",
     description:
-      "Crea el perfil de un nuevo técnico. Pide nombre completo (con apellidos), ciudad, especialidades, modalidad, y un teléfono de contacto donde RRHH pueda llamar. Idempotente en phone.\n\nLa herramienta valida la identidad antes de escribir. Si rechaza con `error: 'INCOMPLETE_IDENTITY'`, vendrá con `next_action` ('ask_apellidos' o 'ask_contact_phone'), `missing[]` con lo que falta, y `user_message_hint` con la frase exacta a entregar al técnico (puedes parafrasearla pero pide LO MISMO que dice missing[]). NO insistas si el técnico ya respondió a esa pregunta — el handler decide.",
+      "Crea el perfil de un nuevo técnico. Pide nombre completo (con apellidos), ciudad, especialidades, modalidad, y un teléfono de contacto donde nuestra área de talento humano pueda llamar. Idempotente en phone.\n\nLa herramienta valida la identidad antes de escribir. Si rechaza con `error: 'INCOMPLETE_IDENTITY'`, vendrá con `next_action` ('ask_apellidos' o 'ask_contact_phone'), `missing[]` con lo que falta, y `user_message_hint` con la frase exacta a entregar al técnico (puedes parafrasearla pero pide LO MISMO que dice missing[]). NO insistas si el técnico ya respondió a esa pregunta — el handler decide.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -60,7 +60,7 @@ export const TOOL_DECLARATIONS = [
         contact_phone: {
           type: "STRING",
           description:
-            "Teléfono donde RRHH puede llamar al técnico. 10 dígitos colombianos o +57 + 10 dígitos. Puede ser el mismo de WhatsApp o uno distinto. La herramienta rechaza si falta o no parece teléfono.",
+            "Teléfono donde nuestra área de talento humano puede llamar al técnico. 10 dígitos colombianos o +57 + 10 dígitos. Puede ser el mismo de WhatsApp o uno distinto. La herramienta rechaza si falta o no parece teléfono.",
         },
         source: {
           type: "STRING",
@@ -195,7 +195,7 @@ export const TOOL_DECLARATIONS = [
   {
     name: "submit_candidate_dossier",
     description:
-      "Envía el dossier estructurado del técnico a RRHH. Llámalo cuando ya tengas la cédula del técnico Y un panorama útil del perfil. Valida cédula contra registros existentes; si la cédula coincide con un técnico ya aprobado/rechazado/etc., retorna un código de outcome y NO crea un duplicado. El estado SIEMPRE queda en 'pending' tras una submisión exitosa — RRHH decide. Producir tono_recommendation + tono_confidence + tono_reasoning con base en lo que recolectaste; son una sugerencia, no una decisión final.",
+      "Envía el dossier estructurado del técnico a nuestra área de talento humano. Llámalo cuando ya tengas la cédula del técnico Y un panorama útil del perfil. Valida cédula contra registros existentes; si la cédula coincide con un técnico ya aprobado/rechazado/etc., retorna un código de outcome y NO crea un duplicado. El estado SIEMPRE queda en 'pending' tras una submisión exitosa — nuestra área de talento humano decide. Producir tono_recommendation + tono_confidence + tono_reasoning con base en lo que recolectaste; son una sugerencia, no una decisión final.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -308,7 +308,7 @@ export const TOOL_DECLARATIONS = [
             },
             dossier: {
               type: "STRING",
-              description: "Texto libre, máx 2000 caracteres. Lo lee RRHH.",
+              description: "Texto libre, máx 2000 caracteres. Lo lee nuestra área de talento humano.",
             },
             tono_recommendation: {
               type: "STRING",
@@ -392,7 +392,7 @@ export const TOOL_DECLARATIONS = [
   {
     name: "complete_legacy_profile",
     description:
-      "Solo para CASO A (técnico legacy con profile_complete=false). Recolecta de forma incremental los datos faltantes (cédula, ciudad_base, categorías, certificaciones, etc.) y guarda en enrichment_data. NO crea candidate_dossiers. NO dispara revisión de RRHH. NO cambia el estado (queda 'approved'). Idempotente — pasar los mismos datos dos veces es no-op. profile_complete pasa a true automáticamente cuando hay cédula + ciudad_base + ≥1 categoría_principal.",
+      "Solo para CASO A (técnico legacy con profile_complete=false). Recolecta de forma incremental los datos faltantes (cédula, ciudad_base, categorías, certificaciones, etc.) y guarda en enrichment_data. NO crea candidate_dossiers. NO dispara revisión de nuestra área de talento humano. NO cambia el estado (queda 'approved'). Idempotente — pasar los mismos datos dos veces es no-op. profile_complete pasa a true automáticamente cuando hay cédula + ciudad_base + ≥1 categoría_principal.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -424,6 +424,26 @@ export const TOOL_DECLARATIONS = [
         },
       },
       required: ["tecnico_id", "profile_data"],
+    },
+  },
+  {
+    name: "classify_documento",
+    description:
+      "Clasifica un documento subido por el técnico usando visión multimodal. Llámalo INMEDIATAMENTE después de upload_documento para confirmar que el documento corresponde al tipo solicitado. Devuelve classified_type, matches_expected (bool), confidence (0-1). Si matches_expected=false, dile al técnico amablemente y pide el documento correcto.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        documento_id: {
+          type: "STRING",
+          description: "ID del documento retornado por upload_documento",
+        },
+        expected_tipo: {
+          type: "STRING",
+          description:
+            "El tipo que el técnico/agente declaró al subir el documento. Opcional — si se omite se usa el tipo almacenado en la fila. Valores: cedula | cert_electrica | arl | ss | altura | antecedentes | cert_estudios | cert_trabajos_previos | evidencia_arl | evidencia_eps | paz_y_salvo | contrato | otro",
+        },
+      },
+      required: ["documento_id"],
     },
   },
 ] as const;

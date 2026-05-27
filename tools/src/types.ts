@@ -289,3 +289,25 @@ export interface LogEventInput {
 export interface LogEventOutput {
   evento_id: string;
 }
+
+// ---------- classify_documento ----------
+export interface ClassifyDocumentoInput {
+  documento_id: string;
+  // The tipo the worker/agent claimed when uploading. Used to compute
+  // matches_expected (loose match). Defaults to the stored tipo if omitted.
+  expected_tipo?: string;
+}
+export interface ClassifyDocumentoOutput {
+  // One of: cedula | cert_electrica | arl | ss | altura | antecedentes |
+  // cert_estudios | cert_trabajos_previos | evidencia_arl | evidencia_eps |
+  // paz_y_salvo | contrato | otro | unreadable
+  classified_type: string;
+  // true if classified_type matches expected_tipo (loose: evidencia_arl ~ arl, etc.)
+  matches_expected: boolean;
+  // Gemini's self-reported confidence [0, 1]
+  confidence: number;
+  // Key fields extracted from the document (name, cedula, dates, etc.)
+  extracted_fields?: Record<string, unknown>;
+  // Logical path used for the classification_jsonb column reference (for logging)
+  classification_jsonb_path: string;
+}

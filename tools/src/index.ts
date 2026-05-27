@@ -1,7 +1,7 @@
 // Tools index — import these wherever the agent contract is needed.
 //
-// Agent-visible contract (LLM tool list): 14 tools — see schemas.ts.
-// Dispatch surface (this file): 14 + the deprecated set_qualification_state
+// Agent-visible contract (LLM tool list): 15 tools — see schemas.ts.
+// Dispatch surface (this file): 15 + the deprecated set_qualification_state
 // shim (kept reachable for HR dashboard server actions until Stream B updates
 // them; not in the LLM-visible declarations).
 
@@ -36,6 +36,11 @@ export type {
   RecommendShortlistInput,
   RecommendShortlistOutput,
 } from "./recommend-shortlist-candidate";
+export { classifyDocumento } from "./classify-documento";
+export type {
+  ClassifyDocumentoInput,
+  ClassifyDocumentoOutput,
+} from "./types";
 export type { NameMatch, FindMatchesOptions } from "./legacy-name-match";
 
 // Manos tools (architect-facing) — separate tool set, not in TOOL_DECLARATIONS.
@@ -82,6 +87,7 @@ import { findByCedula } from "./find-by-cedula";
 import { markCandidateWithdrawn } from "./mark-candidate-withdrawn";
 import { completeLegacyProfile } from "./complete-legacy-profile";
 import { findLegacyByName } from "./find-legacy-by-name";
+import { classifyDocumento } from "./classify-documento";
 import type { ToolName } from "./schemas";
 import type { ToolResult } from "./types";
 
@@ -132,6 +138,9 @@ export async function dispatchTool(
     case "complete_legacy_profile":
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return completeLegacyProfile(ctx, args as any);
+    case "classify_documento":
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return classifyDocumento(ctx, args as any);
     case "set_qualification_state":
       // Deprecated. Routed to the compat shim. Not in schemas.ts so the LLM
       // never sees it; HR dashboard server actions still call it by name
