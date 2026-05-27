@@ -38,7 +38,12 @@ export class ModelUnavailableError extends Error {
 
 const log = createLogger("tono:llm");
 
-const MODEL = "claude-haiku-4-5";
+// 2026-05-25: Model is env-overridable so we can swap Haiku 4.5 → Sonnet 4.5
+// (or revert) without a code change. Default stays Haiku 4.5 to preserve
+// behavior if env is unset/empty. eventos.meta.model logs the actual model
+// per LLM call (see logLlmCall). To activate Sonnet: set TONO_MODEL=claude-sonnet-4-5
+// in .env.local. To revert: remove or set back to claude-haiku-4-5.
+const MODEL = process.env.TONO_MODEL?.trim() || "claude-haiku-4-5";
 const TIMEOUT_MS = 45_000; // bumped from 30s — thinking turns can take longer
 const MAX_TOOL_ITERATIONS = 6;
 

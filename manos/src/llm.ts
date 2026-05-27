@@ -45,7 +45,9 @@ export class ModelUnavailableError extends Error {
 
 const log = createLogger("manos:llm");
 
-const MODEL = "claude-haiku-4-5";
+// 2026-05-25: Model is env-overridable (mirrors tono/src/llm.ts). Default
+// stays Haiku 4.5; set MANOS_MODEL=claude-sonnet-4-5 in .env.local to swap.
+const MODEL = process.env.MANOS_MODEL?.trim() || "claude-haiku-4-5";
 const TIMEOUT_MS = 30_000;
 const MAX_TOOL_ITERATIONS = 6;
 const MAX_TOKENS = 1024;
