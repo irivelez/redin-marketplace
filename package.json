@@ -28,7 +28,8 @@
     "gen:types": "tsx --env-file=.env.local scripts/gen-supabase-types.ts",
     "typecheck": "npm --workspaces --if-present run typecheck",
     "lint": "npm --workspaces --if-present run lint",
-    "migrate": "tsx --env-file=.env.local scripts/run-migration.ts"
+    "migrate": "tsx --env-file=.env.local scripts/run-migration.ts",
+    "smoke:manos": "tsx --env-file=.env.local scripts/manos-smoke.ts"
   },
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",

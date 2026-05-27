@@ -147,6 +147,162 @@
       ],
       "status": "open",
       "attempts": 0
+    },
+    {
+      "id": "S08",
+      "title": "Manos architect feedback loop — send link + PDF document to architect after finalize_alcance",
+      "prd_section": "§9.8",
+      "category": "agent-prompt-and-tool",
+      "added": "2026-05-25",
+      "context": "After finalize_alcance succeeds, architect currently sees nothing in the Manos WA thread — they have no idea what was generated. Fix: send a text with a signed Supabase URL AND the PDF as a native WhatsApp document attachment, so architect can review from phone OR laptop and confirm/redo immediately.",
+      "acceptance_criteria": [
+        "tools/src/manos/finalize-alcance.ts inserts TWO outbound_messages rows after PDF upload succeeds: (1) kind='text' with body containing signed URL (24h expiry minted via supabase.storage.createSignedUrl), (2) kind='document' with attachment_path/bucket pointing to alcance-photos/{ot_row_id}/alcance.pdf",
+        "Both rows have channel='manos' so the Manos outbound drainer (manos/src/outbound.ts) picks them up",
+        "Architect's phone is the session phone — pulled from the existing session context, no new lookup",
+        "manos/src/prompts/manos-system.ts tells the LLM the link + PDF send is automatic and the LLM's reply is a short confirmation ('Listo, te mandé el alcance. Si algo está mal, dime y lo regeneramos.')",
+        "Architect must NOT receive duplicate messages on re-finalize — idempotency via meta.kind='manos_alcance_preview_*' + dedup if not strictly needed (acceptable to send fresh pair on each finalize)",
+        "npm run typecheck passes across all 6 workspaces"
+      ],
+      "files_expected": [
+        "tools/src/manos/finalize-alcance.ts",
+        "manos/src/prompts/manos-system.ts"
+      ],
+      "verification": [
+        "Smoke from test architect phone (in arquitectos_mirror): send 'hola' → cédula → 'qué OTs tengo' → photo + voice describing scope → confirm → finalize",
+        "Within 5s in same WA thread: receive text message with link AND a PDF document attachment",
+        "Click the link → opens PDF in browser (or WA's inline viewer)",
+        "Tap the PDF document → opens inline in WhatsApp",
+        "Both messages visible in /tmp/manos-dev.log as 'sent' (outbound drainer log line)",
+        "outbound_messages table shows 2 new rows with status='sent', meta.kind='manos_alcance_preview_link' + 'manos_alcance_preview_doc'"
+      ],
+      "progress_2026_05_26": {
+        "code_complete": true,
+        "files_changed": [
+          "tools/src/manos/finalize-alcance.ts (+143 lines: added enqueueArchitectAlcancePreview helper called from finalize success path)",
+          "manos/src/prompts/manos-system.ts (+10 lines: new ## Después de finalize_alcance section)",
+          "scripts/smoke-s08-finalize-preview.ts (new, reusable regression smoke)"
+        ],
+        "typecheck": "npm run typecheck PASSED across all 6 workspaces",
+        "db_layer_smoke": {
+          "ran": "scripts/smoke-s08-finalize-preview.ts against production Supabase",
+          "result": "PASS",
+          "evidence": "Both outbound_messages rows landed: link row (kind=text, meta.kind=manos_alcance_preview_link, body contains 'Listo' + 24h signed URL), doc row (kind=document, attachment_bucket=alcance-photos, attachment_path=LK4cgHD0DlytRsCBwx8zKZ/alcance.pdf, attachment_filename=Alcance_OT_c8e6a844.pdf, status=pending). Cleanup deleted both rows + the fake test session.",
+          "side_effect": "Created the missing alcance.pdf for OT LK4cgHD0DlytRsCBwx8zKZ (TEST OT) in alcance-photos bucket — non-destructive (was null before)."
+        },
+        "blocked_on": "Live WA delivery proof requires either (a) stopping Railway manos-mp + restarting local Manos + smoke from real architect WA, or (b) deploying to Railway + smoke on prod. Both need Irina's call per handoff Hard Don'ts (no deploy without explicit ask, Railway manos-mp service is in her account)."
+      },
+      "status": "code_complete_pending_live_smoke",
+      "attempts": 1
+    },
+    {
+      "id": "S09",
+      "title": "AppSheet Alcance_OT field type — decide link vs file upload, implement chosen approach",
+      "prd_section": "§7 (Writeback Exceptions) + §9.8",
+      "category": "architecture-decision",
+      "added": "2026-05-25",
+      "context": "Both approaches PROVEN VIABLE on TEST OT 2026-05-25: text writes to Alcance_OT persist (link approach), AND base64 PDF uploads succeed (AppSheet transforms data URL into native file reference). The choice depends on (a) whether we can stand up a permanent auth-gated route in dashboard for the link, (b) whether Jose's team can/will share the AppSheet backing Drive folder with HR users (required for file widget download).",
+      "decision_required_before_implementation": "Must be made WITH Irina (and ideally Jose) at session start. Do not pick unilaterally — has product implications for Jose's mobile UX.",
+      "options": {
+        "A": {
+          "name": "Durable link in text-typed Alcance_OT column",
+          "approach": "Stand up dashboard route /api/alcance/[ot_id] that streams the latest alcance PDF from Supabase Storage with auth (or use a long-lived signed URL refreshed by projector on re-finalize)",
+          "pros": ["Always serves current version (re-finalize → same link)", "Works on any device (laptop browser, mobile)", "No Drive permission setup needed", "Easy to share/forward"],
+          "cons": ["Need to build + maintain the route", "Auth model TBD (public bucket vs signed URL vs OAuth)", "If link format changes, all AppSheet rows need re-writeback"],
+          "implementation_sketch": "1. Build dashboard/src/app/api/alcance/[ot_id]/route.ts that fetches alcance_pdf_path from ots_extended, streams the bytes from Supabase Storage. 2. Update sync/src/projector.ts buildAlcanceOtValue to return the dashboard URL string instead of text-with-PDF-path. 3. Re-queue 3 OTs (Ht6..., 1Bt..., LK4...) to back-fill."
+        },
+        "B": {
+          "name": "PDF file upload to file-typed Alcance_OT column",
+          "approach": "Update projector to download PDF from Supabase Storage, base64-encode, write as data:application/pdf;base64,... — proven works on TEST OT",
+          "pros": ["Native AppSheet file widget", "PDF survives in Jose's universe even if marketplace dashboard goes down", "Mobile-friendly inline preview in AppSheet app"],
+          "cons": ["Snapshot (re-finalize creates a new file)", "Requires Drive folder sharing (Jose action) for HR users to download from web UI", "Base64 doubles bytes during transport"],
+          "implementation_sketch": "1. Modify sync/src/projector.ts buildAlcanceOtValue to: download PDF via supa.storage.from('alcance-photos').download(pdfPath), Buffer to base64, return 'data:application/pdf;base64,'+b64. 2. Re-queue 3 OTs to back-fill. 3. Coordinate with Jose to share AppSheet backing Drive folder."
+        }
+      },
+      "acceptance_criteria": [
+        "Decision documented in handoff Decisions log (§10) BEFORE writing any code",
+        "ONE of Option A or Option B implemented (not both)",
+        "sync/src/projector.ts buildAlcanceOtValue updated to return the chosen format",
+        "Re-queue: UPDATE ots_extended SET appsheet_alcance_pending=true, appsheet_alcance_sync_attempts=0, appsheet_alcance_last_error=null WHERE ot_row_id IN ('Ht6UBQ8NmNacSb0Hgnd66Q', '1BtTtVebo55GQzxYoaWgv6', 'LK4cgHD0DlytRsCBwx8zKZ')",
+        "Wait 60s for projector to run, verify all 3 OTs show correctly in AppSheet UI",
+        "If Option A: signed URL or permanent route works from a fresh browser session (no auth in URL) on at least 2 of the 3 OTs",
+        "If Option B: PDF widget shows in AppSheet UI for all 3 OTs, and Jose can download (Drive permissions must be sorted)",
+        "npm run typecheck passes",
+        "Rollback plan documented (revert commit + re-queue with empty Alcance_OT)"
+      ],
+      "files_expected": [
+        "sync/src/projector.ts",
+        "(Option A only) dashboard/src/app/api/alcance/[ot_id]/route.ts"
+      ],
+      "blocked_by": "S08 (Track A.1 ships first as independent commit before this larger change)",
+      "status": "decision_pending",
+      "attempts": 0
+    },
+    {
+      "id": "S10",
+      "title": "Architect auto-prompt on OT state-4 transition (real-time webhook OR daily cron fallback)",
+      "prd_section": "§9.9",
+      "category": "architect-notification",
+      "added": "2026-05-26",
+      "context": "Pre-2026-05-26 the architect had no automatic trigger to scope a new state-4 OT — the only prompts were (a) architect remembering on their own, or (b) HR clicking the 'pedir alcance al arquitecto' button (wrong domain owner per §9.9 reasoning). This story moves the trigger to where it belongs: the system itself, listening to AppSheet state transitions. HR dashboard becomes pure observability (kept in S11).",
+      "decision_required_before_implementation": "Pick webhook path vs cron fallback based on Jose's answers to the 3 open questions in PRD §9.9. Webhook is preferred (real-time); cron is the fallback if AppSheet bots unavailable. Do NOT pick unilaterally — paths have different operational profiles for Jose's team.",
+      "options": {
+        "A": {
+          "name": "Real-time AppSheet webhook (preferred)",
+          "approach": "Jose configures an AppSheet bot: trigger on Ordenes_Trabajo row update where Estado newly starts with '4.', action = HTTP POST to dashboard endpoint. Dashboard endpoint validates HMAC, checks ots_extended.alcance_jsonb, if NULL enqueues Manos outbound message with scheduled_at = next 07:00 America/Bogota for humane delivery.",
+          "pros": ["Latency in seconds vs 24h", "No polling overhead", "Single source of truth (AppSheet IS the state change)", "Naturally event-driven"],
+          "cons": ["Requires Jose to configure 1 bot (~10min one-time)", "Depends on AppSheet bot service uptime", "Requires Core plan or above (paid feature)"],
+          "implementation_sketch": "1. Add migration 017_outbound_messages_scheduled_at.sql: ADD COLUMN scheduled_at timestamptz, index on (status, scheduled_at) WHERE status='pending'. 2. Update manos/src/outbound.ts drainer query: ...AND (scheduled_at IS NULL OR scheduled_at <= now()). 3. Build dashboard/src/app/api/appsheet-hooks/ot-state-4/route.ts: validate HMAC (shared secret in env APPSHEET_HOOK_SECRET), parse body, query ots_extended, compose architect message using arquitectos_mirror.Telefono + Nombre, compute scheduled_at via date-fns-tz, INSERT outbound_messages, log to eventos as architect_alcance_prompt. 4. Coordinate with Jose to add the bot pointing at the new endpoint."
+        },
+        "B": {
+          "name": "Daily cron fallback at 06:30 America/Bogota",
+          "approach": "If AppSheet bots unavailable: cron job in sync workspace runs daily at 06:30 Bogota. SELECT state-4 OTs LEFT JOIN ots_extended WHERE alcance_jsonb IS NULL, group by ID_Arquitecto, send one consolidated message per architect listing all their pending OTs.",
+          "pros": ["No external dependency", "Predictable rhythm (architect knows morning queue is the standup)", "Consolidated batched delivery = less notification noise"],
+          "cons": ["Up to 24h latency (counting 15min mirror lag, up to 24h15min)", "Daily SELECT cost (negligible at v1 scale)"],
+          "implementation_sketch": "1. Add scheduled_at migration (same as Option A — useful for future). 2. New file sync/src/architect-daily-prompt.ts: query, group, format consolidated body, INSERT one outbound_messages row per architect (kind='text', channel='manos'), INSERT eventos per OT for audit + idempotency. 3. Wire cron in sync/src/runner.ts: cron.schedule('30 6 * * *', runDailyArchitectPrompt, { timezone: 'America/Bogota' }). 4. Dry-run smoke first (TONO_DEV_INJECT-style print-don't-send), then live."
+        }
+      },
+      "acceptance_criteria": [
+        "Decision documented in handoff Decisions log: Option A vs B chosen WITH reasoning based on Jose's answers",
+        "Migration 017 adds outbound_messages.scheduled_at (timestamptz, nullable, default null) + partial index on (status, scheduled_at) WHERE status='pending'",
+        "manos/src/outbound.ts drainer query gated on (scheduled_at IS NULL OR scheduled_at <= now())",
+        "If Option A: dashboard/src/app/api/appsheet-hooks/ot-state-4/route.ts validates HMAC via APPSHEET_HOOK_SECRET env, checks alcance, computes scheduled_at next-07:00-Bogota, enqueues with idempotency check (skip if architect_alcance_prompt event for this ot_row_id within last 20h)",
+        "If Option B: sync/src/architect-daily-prompt.ts + cron in runner.ts. Dry-run mode supported (env DRY_RUN=1 logs intended sends, no DB writes). Consolidated message per architect.",
+        "Smoke proves: alcance-present OTs are NEVER pinged; alcance-missing OTs ARE pinged; scheduled_at falls in 07:00-19:00 Bogota window; idempotency holds on re-run",
+        "npm run typecheck passes across all 6 workspaces"
+      ],
+      "files_expected": [
+        "PRD.md (§9.9)",
+        "migrations/017_outbound_messages_scheduled_at.sql",
+        "manos/src/outbound.ts (scheduled_at gate)",
+        "(Option A) dashboard/src/app/api/appsheet-hooks/ot-state-4/route.ts",
+        "(Option B) sync/src/architect-daily-prompt.ts + sync/src/runner.ts"
+      ],
+      "blocked_by": "Coordination with Jose on AppSheet bot configuration (PRD §9.9 open questions 1-3)",
+      "status": "decision_pending",
+      "attempts": 0
+    },
+    {
+      "id": "S11",
+      "title": "Remove HR 'pedir alcance al arquitecto' button (replaced by S10 auto-prompt)",
+      "prd_section": "§9.9 + §11",
+      "category": "cleanup",
+      "added": "2026-05-26",
+      "context": "The 'pedir alcance al arquitecto' button on HR pipeline cards (dashboard/src/components/NudgeArchitectButton.tsx) was a manual nudge that filled the gap of no system-level architect notification on state-4 transition. With S10 shipped, the architect domain owns the trigger and HR doesn't need a button. Dashboard becomes pure observability — the ✓ alcance pill stays as status indicator. Confirmed visible bug today: button shows on OTs that already have ✓ alcance + sent contract (the bottom-row instance ignores hasAlcance — pipeline/page.tsx:436 hardcodes showNudgeButton=true).",
+      "acceptance_criteria": [
+        "DELETE: dashboard/src/components/NudgeArchitectButton.tsx",
+        "DELETE: dashboard/src/app/api/hr/nudge-architect/route.ts",
+        "EDIT: dashboard/src/app/hr/pipeline/page.tsx — remove import of NudgeArchitectButton, remove both usages (line 449 in header chip area, line 543-545 in bottom action row), remove the stale 'showNudgeButton = true' const block at lines 430-436. Header chip area should show ✓ alcance pill if hasAlcance else nothing (no button).",
+        "npm run typecheck passes",
+        "Visual check via /playwright skill on production dashboard: pipeline page renders without errors; ✓ alcance pill appears on OTs with alcance; no orange/amber button anywhere on the page; OTs without alcance show no action button (only the rest of the card chrome)"
+      ],
+      "files_expected": [
+        "dashboard/src/components/NudgeArchitectButton.tsx (DELETE)",
+        "dashboard/src/app/api/hr/nudge-architect/route.ts (DELETE)",
+        "dashboard/src/app/hr/pipeline/page.tsx (EDIT)"
+      ],
+      "blocked_by": "S10 must be ready to ship in the same release (otherwise the architect notification gap returns). Ship S11 in the same commit as S10 OR immediately after, never alone.",
+      "status": "blocked_by_s10",
+      "attempts": 0
     }
   ]
 }
