@@ -116,3 +116,56 @@ async function markRetry(supa: SupabaseClient, id: string, attempts: number, err
     .update({ attempts, last_error: error, status })
     .eq("id", id);
 }
+
+// Resilient send for Manos's per-turn agent reply. Mirrors the helper in
+// tono/src/outbound.ts — same enqueue-first invariant prevents replies from
+// being lost when Baileys is mid-reconnect. The channel="manos" tag keeps
+// agent-generated rows on Manos's drainer, separate from Toño's queue.
+export async function sendAgentReply(
+  supabase: SupabaseClient,
+  wa: WhatsAppClient,
+  args: {
+    phone: string;
+    jid: string;
+    body: string;
+    meta?: Record<string, unknown>;
+  }
+): Promise<void> {
+  const body = args.body.trim();
+  if (!body) return;
+
+  let outboundId: string | null = null;
+  const { data: outRow, error: insErr } = await supabase
+    .from("outbound_messages")
+    .insert({
+      phone: args.phone,
+      body,
+      channel: "manos",
+      kind: "text",
+      status: "pending",
+      meta: args.meta ?? null,
+    })
+    .select("id")
+    .single();
+  if (insErr) {
+    log.warn("outbound enqueue failed; attempting direct send only", {
+      phone: args.phone,
+      error: insErr.message,
+    });
+  } else if (outRow && typeof (outRow as { id?: unknown }).id === "string") {
+    outboundId = (outRow as { id: string }).id;
+  }
+
+  try {
+    await wa.sendText(args.jid, body);
+    if (outboundId) {
+      await markSent(supabase, outboundId);
+    }
+  } catch (e) {
+    log.warn("direct send failed; left in outbound queue for drainer", {
+      phone: args.phone,
+      id: outboundId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}

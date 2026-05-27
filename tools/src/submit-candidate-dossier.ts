@@ -291,32 +291,31 @@ function validatePayload(
   if (!raw.arl_doc_id) missingOptional.push("ARL");
   if (!raw.eps_doc_id) missingOptional.push("EPS");
 
-  // Gap A.4 strict-docs rule (2026-05-22): if the worker declared ARL or EPS
-  // active but did NOT upload supporting evidence, the profile is INCOMPLETE
-  // for HR decision-making purposes. Override Toño's recommendation to
-  // `recommend_call` regardless of what the LLM proposed — RRHH should call
-  // and either get the doc or downgrade. This is the only place the tool
-  // overrides the LLM's recommendation; everywhere else the LLM owns the
-  // signal.
-  let finalRecommendation = raw.tono_recommendation;
-  let finalConfidence = raw.tono_confidence;
-  let finalReasoning = reasoning;
+  // 2026-05-25 locked decision #3 — EPS NEVER blocks. Preferred-only signal.
+  // Same for ARL (locked 2026-05-23): tie-breaker, not blocker. Redin can
+  // provide both to the worker. Previously this handler auto-downgraded
+  // recommend_approve → recommend_call when EPS was missing, with misleading
+  // wording ("estado EPS desconocido") that didn't reflect what the worker
+  // actually said. That logic was removed; both ARL and EPS now produce
+  // descriptive gap entries only, and the recommendation passes through
+  // exactly as Toño produced it.
+  const finalRecommendation = raw.tono_recommendation;
+  const finalConfidence = raw.tono_confidence;
+  const finalReasoning = reasoning;
   const cumplimiento = raw.cumplimiento ?? { arl_activa: false, eps_activa: false, antecedentes_limpios: null };
-  const arlDeclaredNoDoc = cumplimiento.arl_activa === true && !raw.arl_doc_id;
-  const epsDeclaredNoDoc = cumplimiento.eps_activa === true && !raw.eps_doc_id;
-  if ((arlDeclaredNoDoc || epsDeclaredNoDoc) && raw.tono_recommendation === "recommend_approve") {
-    finalRecommendation = "recommend_call";
-    // Keep the original confidence as a signal of how confident Toño was
-    // BEFORE the override, but clamp to 0.70 max — strict-docs rule is a
-    // hard policy that should always be visible as "needs call".
-    finalConfidence = Math.min(raw.tono_confidence, 0.7);
-    const missingDocs: string[] = [];
-    if (arlDeclaredNoDoc) missingDocs.push("ARL");
-    if (epsDeclaredNoDoc) missingDocs.push("EPS");
-    finalReasoning = `[Auto-downgrade: ${missingDocs.join(" + ")} declarada(s) pero sin documento subido — requiere llamada para validar o pedir evidencia.] ${reasoning}`.slice(0, 500);
-    warnings.push(
-      `tono_recommendation downgraded from recommend_approve to recommend_call: missing ${missingDocs.join("+")} doc(s)`
-    );
+
+  if (cumplimiento.arl_activa === true && !raw.arl_doc_id) {
+    gaps.push("ARL declarada sin documento — Redin puede pedir el carné en validación");
+  } else if (cumplimiento.arl_activa === false) {
+    gaps.push("Sin ARL declarada — Redin puede proveerla");
+  }
+
+  if (cumplimiento.eps_activa === true && !raw.eps_doc_id) {
+    gaps.push("EPS declarada sin documento — Redin puede pedir el carné en validación");
+  } else if (cumplimiento.eps_activa === false) {
+    gaps.push("Sin EPS declarada — Redin puede orientar al técnico");
+  } else if (cumplimiento.eps_activa == null) {
+    gaps.push("EPS no abordada en el screening");
   }
 
   const normalized: CandidateDossier = {

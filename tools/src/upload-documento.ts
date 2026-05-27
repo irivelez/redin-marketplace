@@ -12,6 +12,7 @@ import type {
   UploadDocumentoOutput,
 } from "./types";
 import { err, ok } from "./types";
+import { classifyDocumento } from "./classify-documento";
 
 const BUCKET = "documentos";
 const VALID_TIPOS = new Set([
@@ -106,6 +107,23 @@ export async function uploadDocumento(
       tipo: input.tipo,
       storage_path: storagePath,
     },
+  });
+
+  // Fire-and-forget: classify the doc so HR's DocViewer shows Toño's verdict
+  // without waiting on LLM compliance to call classify_documento manually.
+  // Latency from Gemini multimodal (~3-5s) would block the WA reply, so we
+  // intentionally do not await. Failures only become a warning log entry —
+  // the upload itself is durable in storage and the documentos row already
+  // exists.
+  void classifyDocumento(ctx, {
+    documento_id: inserted.id,
+    expected_tipo: input.tipo,
+  }).catch((e: unknown) => {
+    ctx.logger.warn("upload_documento: auto-classify failed (non-blocking)", {
+      documento_id: inserted.id,
+      tipo: input.tipo,
+      error: e instanceof Error ? e.message : String(e),
+    });
   });
 
   return ok({ documento_id: inserted.id, storage_path: storagePath });
