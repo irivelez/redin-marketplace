@@ -432,7 +432,7 @@ export class AppSheetReadClient {
       body: JSON.stringify({
         Action: "Edit",
         Properties: { Locale: "en-US" },
-        Rows: [{ "Row ID": rowId, ...fields }],
+        Rows: [{ ID_Orden: expectedIdOrden, ...fields }],
       }),
     });
 

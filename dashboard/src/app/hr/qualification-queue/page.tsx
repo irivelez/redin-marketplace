@@ -122,7 +122,7 @@ export default async function HrQualificationQueuePage() {
 
   // TODO(scale): two-query stitch is O(N+latest-dossier-per-N). Pilot scale
   // (~50 candidates) is fine; revisit with a Postgres view or RPC at >5k.
-  const [regEventsRes, dossiersRes, notesRes] = ids.length
+  const [regEventsRes, dossiersRes, notesRes, cedulaDocsRes] = ids.length
     ? await Promise.all([
         supa
           .from("eventos")
@@ -140,8 +140,17 @@ export default async function HrQualificationQueuePage() {
           .select("*")
           .in("tecnico_id", ids)
           .order("created_at", { ascending: false }),
+        supa
+          .from("documentos")
+          .select("tecnico_id")
+          .eq("tipo", "cedula")
+          .in("tecnico_id", ids),
       ])
-    : [{ data: [] }, { data: [] }, { data: [] }];
+    : [{ data: [] }, { data: [] }, { data: [] }, { data: [] }];
+
+  const tecnicosWithCedula = new Set(
+    (cedulaDocsRes.data ?? []).map((d) => d.tecnico_id as string)
+  );
 
   const regByTec = new Map<string, RegisteredMeta>();
   for (const e of regEventsRes.data ?? []) {
@@ -213,6 +222,7 @@ export default async function HrQualificationQueuePage() {
       onboarded_at_human: fmtTime(tec.onboarded_at),
       dossier,
       notes: notesByTec.get(tec.tecnico_id) ?? [],
+      has_cedula_doc: tecnicosWithCedula.has(tec.tecnico_id),
     };
   });
 
