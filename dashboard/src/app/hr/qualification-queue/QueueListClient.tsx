@@ -61,6 +61,7 @@ export interface QueueItem {
   onboarded_at_human: string;
   dossier: QueueDossier | null;
   notes: QueueNote[];
+  has_cedula_doc: boolean;
 }
 
 const REMOVES_FROM_QUEUE = new Set<HrAction>(["approve", "reject"]);
@@ -215,6 +216,13 @@ function QueueCard({
 
   function decide(action: HrAction): void {
     setError(null);
+    if (action === "approve" && !tec.has_cedula_doc && !reasoning.trim()) {
+      setError(
+        "Falta foto de la cédula. Sube el documento o explica en la nota cómo validaste la identidad."
+      );
+      document.getElementById(`hr_reasoning_${tec.tecnico_id}`)?.focus();
+      return;
+    }
     if (REMOVES_FROM_QUEUE.has(action)) {
       onMarkRemoved(tec.tecnico_id);
     }
@@ -357,6 +365,17 @@ function QueueCard({
                 )}
               </div>
             )}
+
+          {!tec.has_cedula_doc && (
+            <div className="mt-2">
+              <span className="inline-flex items-center gap-1 rounded-md bg-rose-50 text-rose-800 border border-rose-300 px-2 py-0.5 text-xs font-semibold">
+                ❌ Falta foto de la cédula
+              </span>
+              <span className="ml-2 text-[11px] text-rose-700">
+                Sube el documento o agrega nota explicando la validación.
+              </span>
+            </div>
+          )}
 
           {tec.dossier && tec.dossier.missing_optional.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1">

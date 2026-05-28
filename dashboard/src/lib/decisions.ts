@@ -1,25 +1,3 @@
-// HR decision server actions — submitDecision (writes a candidate_decisions row,
-// flips candidate_state via compare-and-set, fires side effects) and
-// appendHrNote (appends to hr_notes thread).
-//
-// Atomicity strategy (per docs/architecture/onboarding-contracts.md §5.1):
-//
-//   1. CAS UPDATE on tecnicos_extended FIRST. If the row's candidate_state no
-//      longer matches the form's prior_state, return stale_click — the user's
-//      view is stale; do NOT write any audit rows.
-//   2. Latest-dossier sanity: re-read latest candidate_dossiers row for the
-//      tecnico. If the form's dossier_id != latest, ROLL BACK state via reverse
-//      CAS and return stale_dossier. The tono_recommendation_at_decision_time
-//      snapshot would otherwise be against a dossier HR never saw.
-//   3. Eventos before candidate_decisions: write the eventos row first so that
-//      a partial-failure on the candidate_decisions INSERT still leaves a
-//      reconstructable audit trail.
-//   4. Side effects last: enqueue WhatsApp via outbound_messages queue.
-//
-// Stream A's submit_candidate_dossier and the deprecated set_qualification_state
-// shim use a similar non-transactional sequence — we match that risk profile
-// rather than introducing a Postgres RPC.
-
 "use server";
 
 import { revalidatePath } from "next/cache";
@@ -33,7 +11,191 @@ import {
 import { enqueueWhatsApp } from "@/lib/notify";
 import { serverClientBoundToCookies, serviceClient } from "@/lib/supabase-server";
 import { computeResultingState } from "@/lib/decisions-state";
-import { composeApprovalMessage } from "@/lib/approval-message";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { OFFERABLE_ESTADO } from "@redin/tools/read-pending-ots";
+import { hasCedulaUploaded } from "@redin/tools/missing-docs";
+import { otDescripcion, otTotalOrdenCalculado } from "@/lib/ot-display";
+
+// ---------------------------------------------------------------------------
+// Session expiry
+// ---------------------------------------------------------------------------
+
+// Force-expire active WhatsApp sessions for a phone by setting last_active to
+// 2 hours ago. SessionStore.getOrCreate uses a 60-minute freshness window
+// ([`tono/src/session.ts`](file:///../../tono/src/session.ts) SESSION_TTL_MIN),
+// so 2 hours is comfortably outside that window and survives clock skew.
+// Best-effort: failures are logged and never block the HR decision flow.
+async function expireWhatsAppSessions(
+  supa: SupabaseClient,
+  phone: string
+): Promise<void> {
+  try {
+    const twoHoursAgoIso = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const { error, count } = await supa
+      .from("sessions")
+      .update({ last_active: twoHoursAgoIso }, { count: "exact" })
+      .eq("phone", phone)
+      .eq("channel", "whatsapp")
+      .gte("last_active", new Date(Date.now() - 60 * 60 * 1000).toISOString());
+    if (error) {
+      console.warn("expireWhatsAppSessions failed (non-fatal)", {
+        phone,
+        error: error.message,
+      });
+      return;
+    }
+    if ((count ?? 0) > 0) {
+      console.info("expireWhatsAppSessions: expired", { phone, count });
+    }
+  } catch (e) {
+    console.warn("expireWhatsAppSessions threw (non-fatal)", {
+      phone,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Approval push helpers
+// ---------------------------------------------------------------------------
+
+const MAX_OT_LINES = 3;
+const MAX_DESC_LEN = 60;
+
+function _truncateDesc(s: string): string {
+  if (s.length <= MAX_DESC_LEN) return s;
+  return s.slice(0, MAX_DESC_LEN - 1).trimEnd() + "…";
+}
+
+function _normalizeStr(s: string): string {
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+}
+
+interface _ApprovalOtLine {
+  row_id: string;
+  descripcion: string;
+  valor_label: string | null;
+  ciudad: string | null;
+}
+
+// Sends composite numbered WA message on approval. Idempotent (skips on duplicate).
+// Failures are caught — must NEVER block the approval state flip.
+async function fireApprovalPush(
+  supa: SupabaseClient,
+  tecnicoId: string,
+  phone: string
+): Promise<void> {
+  try {
+    const { data: existing } = await supa
+      .from("outbound_messages")
+      .select("id")
+      .eq("phone", phone)
+      .contains("meta", { kind: "approval_push", tecnico_id: tecnicoId })
+      .limit(1)
+      .maybeSingle();
+    if (existing) {
+      console.info("fireApprovalPush: duplicate skipped", { tecnicoId });
+      return;
+    }
+
+    const [tecRes, regRes] = await Promise.all([
+      supa
+        .from("tecnicos_extended")
+        .select("nombre")
+        .eq("tecnico_id", tecnicoId)
+        .maybeSingle(),
+      supa
+        .from("eventos")
+        .select("meta")
+        .eq("type", "tecnico_registered")
+        .eq("entity_id", tecnicoId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    const nombre = (tecRes.data?.nombre as string | null | undefined) ?? null;
+    const firstName = nombre ? (nombre.trim().split(/\s+/)[0] ?? nombre) : null;
+    const regMeta = regRes.data?.meta as Record<string, unknown> | null | undefined;
+    const ciudad = regMeta && typeof regMeta.ciudad === "string" ? regMeta.ciudad : null;
+
+    let matchingOts: _ApprovalOtLine[] = [];
+    if (ciudad) {
+      const { data: ots } = await supa
+        .from("ots_mirror")
+        .select("row_id, ciudad, especialidad, data")
+        .eq("estado", OFFERABLE_ESTADO);
+
+      const ciudadNorm = _normalizeStr(ciudad);
+      matchingOts = (ots ?? [])
+        .filter((o) => o.ciudad && _normalizeStr(o.ciudad).includes(ciudadNorm))
+        .slice(0, MAX_OT_LINES)
+        .map((o) => {
+          const desc = _truncateDesc(otDescripcion(o.data) || "(sin descripción)");
+          const valor = otTotalOrdenCalculado(o.data);
+          return {
+            row_id: o.row_id,
+            descripcion: desc,
+            valor_label: valor.label,
+            ciudad: o.ciudad,
+          };
+        });
+    }
+
+    const greeting = firstName ? `¡Felicidades, ${firstName}!` : "¡Felicidades!";
+    const n = matchingOts.length;
+    let body: string;
+
+    if (n === 0) {
+      body = `${greeting} Tu perfil quedó aprobado. Apenas haya trabajos que te calcen en tu zona te aviso. También puedes preguntarme '¿hay trabajo?' cuando quieras.`;
+    } else {
+      const jobWord = n === 1 ? "trabajo" : "trabajos";
+      const lines = matchingOts.map((ot, i) => {
+        const valorPart = ot.valor_label ? ` — ${ot.valor_label}` : "";
+        const ciudadPart = ot.ciudad ? ` · ${ot.ciudad}` : "";
+        return `${i + 1}. ${ot.descripcion}${valorPart}${ciudadPart}`;
+      });
+      body = [
+        `${greeting} Tu perfil quedó aprobado.`,
+        "",
+        `Hay ${n} ${jobWord} para ti:`,
+        ...lines,
+        "",
+        "¿Cuál te interesa? Respóndeme con el número o pídeme más detalles.",
+      ].join("\n");
+    }
+
+    // ot_row_ids[] makes the push numerically addressable downstream. When the
+    // worker replies "2" / "el primero" / "la segunda", tono's
+    // approval-push-replies handler resolves the index → row_id → creates the
+    // postulación pre-LLM. Without these IDs the worker reply would fall to
+    // the LLM with no grounded way to map "2" back to a real OT (see the
+    // May25-camilo2 chat regression for the failure mode).
+    await enqueueWhatsApp(supa, {
+      phone,
+      body,
+      meta: {
+        kind: "approval_push",
+        tecnico_id: tecnicoId,
+        ot_count: n,
+        ciudad,
+        ot_row_ids: matchingOts.map((o) => o.row_id),
+      },
+    });
+
+    await supa.from("eventos").insert({
+      type: "approval_push_sent",
+      entity_id: tecnicoId,
+      actor: "system",
+      meta: { ot_count: n, ciudad, phone },
+    });
+  } catch (e) {
+    console.error("fireApprovalPush failed (non-blocking)", {
+      tecnicoId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // submitDecision
@@ -92,19 +254,41 @@ export async function submitDecision(formData: FormData): Promise<void> {
 
   const supa = serviceClient();
 
-  // -------- 1. CAS UPDATE on tecnicos_extended ---------------------------
-  // Compare-and-set: only flip if candidate_state still matches prior_state.
-  // Side-effect flags ride along in the same UPDATE to keep them atomic with
-  // the state flip.
+  // Approval gate (per Irina 2026-05-24): block approve when the worker has
+  // no cédula photo uploaded UNLESS HR supplies a note explaining how they
+  // validated offline. The note doubles as an audit record. Other docs
+  // (ARL, EPS) are preferred-only and don't block — Redin can provide ARL,
+  // EPS is a soft signal. This is the only mandatory doc.
+  if (action === "approve") {
+    const cedulaPresent = await hasCedulaUploaded(supa, tecnicoId);
+    if (!cedulaPresent && !hrReasoning) {
+      console.warn("submitDecision: approve blocked — no cédula photo and no override note", { tecnicoId });
+      revalidatePath("/hr/qualification-queue");
+      revalidatePath(`/hr/tecnicos/${tecnicoId}`);
+      return;
+    }
+  }
+
+  // CAS UPDATE: only flip if candidate_state still matches prior_state.
   const patch: {
     candidate_state: CandidateState;
     appsheet_sync_pending?: boolean;
     appsheet_delete_pending?: boolean;
     withdrawal_reason?: string | null;
+    profile_complete?: boolean;
   } = { candidate_state: resultingState };
   if (action === "approve") patch.appsheet_sync_pending = true;
   if (action === "revoke") patch.appsheet_delete_pending = true;
   if (action === "reopen") patch.withdrawal_reason = null;
+  // HR approval IS the signal that the dossier is complete enough to take
+  // jobs. Without this, the worker's next session routes to mode="enrichment"
+  // and Toño re-asks ciudad/categorías even though they were just submitted
+  // (May25-camilo3 regression). Legacy enrichment workers reach approved via
+  // complete_legacy_profile, which already flips profile_complete itself, so
+  // setting true here is also correct for them — it's an idempotent no-op
+  // when they were already complete, and a forward-fix if HR is approving a
+  // legacy row that somehow stayed incomplete.
+  if (action === "approve") patch.profile_complete = true;
 
   const { data: casRows, error: casErr } = await supa
     .from("tecnicos_extended")
@@ -117,7 +301,6 @@ export async function submitDecision(formData: FormData): Promise<void> {
     return;
   }
   if (!casRows || casRows.length === 0) {
-    // Stale click — another HR action moved the row; the user must refresh.
     console.warn("submitDecision stale_click", { tecnicoId, priorState, action });
     revalidatePath("/hr/qualification-queue");
     revalidatePath(`/hr/tecnicos/${tecnicoId}`);
@@ -125,9 +308,7 @@ export async function submitDecision(formData: FormData): Promise<void> {
   }
   const phone = casRows[0]!.phone;
 
-  // -------- 2. Latest-dossier sanity check -------------------------------
-  // Only when the form supplied a dossier_id (decision-from-queue paths).
-  // Revoke/reopen don't reference a dossier; skip the check.
+  // Dossier sanity check — only when form supplied a dossier_id.
   let tonoRecAtDecision: TonoRecommendation | null = null;
   if (formDossierId) {
     const { data: latest } = await supa
@@ -139,16 +320,16 @@ export async function submitDecision(formData: FormData): Promise<void> {
       .maybeSingle();
 
     if (!latest || latest.id !== formDossierId) {
-      // Dossier raced — a newer dossier was submitted between render and submit.
-      // Roll back state via reverse CAS + clear the side-effect flags.
       const rollback: {
         candidate_state: CandidateState;
         appsheet_sync_pending?: boolean;
         appsheet_delete_pending?: boolean;
         withdrawal_reason?: string | null;
+        profile_complete?: boolean;
       } = { candidate_state: priorState };
       if (action === "approve") rollback.appsheet_sync_pending = false;
       if (action === "revoke") rollback.appsheet_delete_pending = false;
+      if (action === "approve") rollback.profile_complete = false;
       const { error: rbErr } = await supa
         .from("tecnicos_extended")
         .update(rollback)
@@ -171,11 +352,9 @@ export async function submitDecision(formData: FormData): Promise<void> {
     tonoRecAtDecision = latest.tono_recommendation as TonoRecommendation;
   }
 
-  // -------- 3. Compute agreed_with_tono ---------------------------------
   const agreedWithTono = computeAgreedWithTono(action, tonoRecAtDecision);
 
-  // -------- 4. Eventos BEFORE candidate_decisions -----------------------
-  // Reconstructable audit if the candidate_decisions INSERT later fails.
+  // Eventos before candidate_decisions — reconstructable audit on partial failure.
   const { error: evErr } = await supa.from("eventos").insert({
     type: "hr_decision",
     entity_id: tecnicoId,
@@ -191,16 +370,9 @@ export async function submitDecision(formData: FormData): Promise<void> {
     },
   });
   if (evErr) {
-    console.error("submitDecision eventos insert failed", {
-      tecnicoId,
-      error: evErr.message,
-    });
-    // Don't return — the state has already flipped. Try to log the decision
-    // anyway. Both eventos + candidate_decisions failing is rare (DB outage);
-    // the operator-facing impact is identical to a single failure.
+    console.error("submitDecision eventos insert failed", { tecnicoId, error: evErr.message });
   }
 
-  // -------- 5. candidate_decisions row ---------------------------------
   const { error: decErr } = await supa.from("candidate_decisions").insert({
     tecnico_id: tecnicoId,
     dossier_id: formDossierId,
@@ -217,46 +389,79 @@ export async function submitDecision(formData: FormData): Promise<void> {
       tecnicoId,
       error: decErr.message,
     });
-    // Audit trail still recoverable from eventos meta payload above.
   }
 
-  // -------- 6. Side effects: WhatsApp -----------------------------------
+  // Expire any active WhatsApp session for this phone BEFORE side-effect
+  // outbounds fire. Two reasons:
+  //   1. The post-decision conversation (approval opener, rejection message,
+  //      schedule_call notice) belongs in a fresh session — its prompt mode
+  //      now reflects the new candidate_state, and re-feeding it the
+  //      pre-decision screening history just poisons the model with stale
+  //      "asking-for-data" cues. May25-camilo3 hit exactly this: after HR
+  //      approved, the worker's next "Hola" rendered enrichment-style
+  //      questions because the prior turns biased the LLM despite the
+  //      corrected [session_state] block.
+  //   2. The system push (approval_push, etc.) persists into `messages`
+  //      via outbound.ts. Without expiry the push lands in the old session;
+  //      with expiry it creates and lands in a fresh session, which is also
+  //      what the worker's next reply will use.
+  if (phone && (action === "approve" || action === "reject" || action === "schedule_call")) {
+    await expireWhatsAppSessions(supa, phone);
+  }
+
+  // Side effects: WhatsApp — no outbound on unschedule_call / revoke / reopen.
   if (phone) {
-    let body: string | null = null;
     if (action === "approve") {
-      // Try to surface matching offerable OTs in the worker's ciudad
-      // inline. Falls back to the legacy static text on any error or when
-      // the worker has no ciudad recorded — never blocks approval.
-      const fallback =
-        "Listo — tu perfil quedó aprobado. Ya puedes postularte a los trabajos que te muestre. Cuando entre algo que te sirva, te aviso.";
-      try {
-        body = await composeApprovalMessage(supa, tecnicoId, fallback);
-      } catch (e) {
-        console.warn("composeApprovalMessage threw; using fallback", {
-          tecnicoId,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        body = fallback;
-      }
+      await fireApprovalPush(supa, tecnicoId, phone);
     } else if (action === "reject") {
-      body =
-        "Hola, revisamos tu perfil y por ahora no podemos seguir adelante. Si quieres conversarlo, puedes responder y te contactamos.";
-    } else if (action === "schedule_call") {
-      body =
-        "Queremos hacerte una llamada corta para conocerte mejor antes de avanzar. Pronto te contactamos para coordinar.";
-    }
-    // No outbound on unschedule_call / revoke / reopen (per contract §2.3 + §6.1).
-    if (body) {
       await enqueueWhatsApp(supa, {
         phone,
-        body,
-        meta: {
-          kind: "hr_decision",
-          tecnico_id: tecnicoId,
-          decision: action,
-          to_state: resultingState,
-        },
+        body: "Hola, revisamos tu perfil y por ahora no podemos seguir adelante. Si quieres conversarlo, puedes responder y te contactamos.",
+        meta: { kind: "hr_decision", tecnico_id: tecnicoId, decision: action, to_state: resultingState },
       });
+    } else if (action === "schedule_call") {
+      // Idempotency: harmonize with Lane B's enqueuePedirLlamada in
+      // tools/src/set-qualification-state.ts. Both writers must skip if a
+      // pedir_llamada_notification was already enqueued in the last 24h —
+      // otherwise the worker gets duplicates when Toño and HR both fire.
+      // We check both meta key shapes (kind=... and notification_type=...)
+      // because the two writers historically used different keys.
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const [byKind, byNotif] = await Promise.all([
+        supa
+          .from("outbound_messages")
+          .select("id")
+          .eq("phone", phone)
+          .gte("created_at", twentyFourHoursAgo)
+          .contains("meta", { kind: "pedir_llamada_notification" })
+          .limit(1)
+          .maybeSingle(),
+        supa
+          .from("outbound_messages")
+          .select("id")
+          .eq("phone", phone)
+          .gte("created_at", twentyFourHoursAgo)
+          .contains("meta", { notification_type: "pedir_llamada_notification" })
+          .limit(1)
+          .maybeSingle(),
+      ]);
+      if (byKind.data || byNotif.data) {
+        console.info("submitDecision schedule_call: pedir_llamada already enqueued in last 24h (skipped)", {
+          tecnicoId,
+        });
+      } else {
+        await enqueueWhatsApp(supa, {
+          phone,
+          body: "Queremos hacerte una llamada corta para conocerte mejor antes de avanzar. Pronto te contactamos para coordinar.",
+          meta: {
+            kind: "pedir_llamada_notification",
+            notification_type: "pedir_llamada_notification",
+            tecnico_id: tecnicoId,
+            decision: action,
+            to_state: resultingState,
+          },
+        });
+      }
     }
   }
 
@@ -266,20 +471,7 @@ export async function submitDecision(formData: FormData): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// appendHrNote — append-only note thread per worker
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // requestDocument — Gap A.5
-//
-// HR-triggered WhatsApp request for a specific evidence doc (ARL/EPS).
-// Mirrors the Telegram-out / outbound_messages pattern used by submitDecision:
-// no direct WA send (dashboard doesn't own the Baileys socket); enqueues a
-// row that tono-mp's drainer ships within ~5s.
-//
-// Idempotency: a single row per click — HR can click twice if they want to
-// re-send. The proactive cron (Gap A.6) has separate spacing logic; HR
-// requests don't count against the 2-max cap because they're intentional.
 // ---------------------------------------------------------------------------
 
 const REQUESTABLE_TIPOS = new Set([
@@ -343,19 +535,19 @@ export async function requestDocument(formData: FormData): Promise<void> {
     },
   });
 
-  // Audit row so the timeline shows when HR last chased this doc.
   await supa.from("eventos").insert({
     type: "hr_doc_request",
     entity_id: tecnicoId,
     actor: `hr:${hrEmail}`,
-    meta: {
-      tipo,
-      phone,
-    },
+    meta: { tipo, phone },
   });
 
   revalidatePath(`/hr/tecnicos/${tecnicoId}`);
 }
+
+// ---------------------------------------------------------------------------
+// appendHrNote
+// ---------------------------------------------------------------------------
 
 export async function appendHrNote(formData: FormData): Promise<void> {
   const auth = serverClientBoundToCookies();
@@ -372,9 +564,6 @@ export async function appendHrNote(formData: FormData): Promise<void> {
 
   const supa = serviceClient();
 
-  // Pin the note to the latest dossier_id when one exists, so the timeline
-  // groups commentary near the dossier it's about. NULL is fine — agent might
-  // not have submitted a dossier yet (e.g. a needs_call note pre-screening).
   const { data: latest } = await supa
     .from("candidate_dossiers")
     .select("id")

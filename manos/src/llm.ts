@@ -45,7 +45,9 @@ export class ModelUnavailableError extends Error {
 
 const log = createLogger("manos:llm");
 
-const MODEL = "claude-haiku-4-5";
+// 2026-05-25: Model is env-overridable (mirrors tono/src/llm.ts). Default
+// stays Haiku 4.5; set MANOS_MODEL=claude-sonnet-4-5 in .env.local to swap.
+const MODEL = process.env.MANOS_MODEL?.trim() || "claude-haiku-4-5";
 const TIMEOUT_MS = 30_000;
 const MAX_TOOL_ITERATIONS = 6;
 const MAX_TOKENS = 1024;
@@ -118,14 +120,25 @@ function lowercaseTypes(node: unknown): unknown {
 }
 
 function toolsForAnthropic(): Anthropic.Tool[] {
-  return MANOS_TOOL_DECLARATIONS.map(
-    (d) =>
-      ({
-        name: d.name,
-        description: d.description,
-        input_schema: lowercaseTypes(d.parameters) as Anthropic.Tool["input_schema"],
-      }) satisfies Anthropic.Tool
-  );
+  const tools: Anthropic.Tool[] = MANOS_TOOL_DECLARATIONS.map((d) => ({
+    name: d.name,
+    description: d.description,
+    input_schema: lowercaseTypes(d.parameters) as Anthropic.Tool["input_schema"],
+  }));
+  if (tools.length > 0) {
+    tools[tools.length - 1]!.cache_control = { type: "ephemeral" };
+  }
+  return tools;
+}
+
+function systemForAnthropic(): Anthropic.TextBlockParam[] {
+  return [
+    {
+      type: "text",
+      text: MANOS_SYSTEM_PROMPT,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
 }
 
 // Convert ConversationTurn[] (our persisted shape) to Anthropic MessageParam[].
@@ -311,7 +324,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
           model: MODEL,
           max_tokens: MAX_TOKENS,
           temperature: TEMPERATURE,
-          system: MANOS_SYSTEM_PROMPT,
+          system: systemForAnthropic(),
           tools,
           messages,
         },

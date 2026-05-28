@@ -32,10 +32,30 @@ export interface TurnSession {
    * haven't loaded it yet — Rule 1c treats null as "not approved" defensively.
    */
   candidate_state: string | null;
+  /**
+   * The canonical WhatsApp identity phone for this turn (the session's
+   * normalized phone / JID-derived phone). Pre-loaded by the agent. Used by
+   * Rule 2b (phone override) to force `register_tecnico` and `identify_user`
+   * to use the WA jid as the row identity — never the typed contact number
+   * the LLM might extract from the chat body.
+   *
+   * Background: 2026-05-25 Camilo test showed the LLM passing
+   * register_tecnico({phone: "3132022942"}) — the user-TYPED Colombian
+   * contact phone — instead of the session WA jid +137877543452841. The row
+   * was created with the wrong identity, breaking identityGate on every
+   * subsequent turn and blocking all auth-gated tools with `not_identified`.
+   * `null` means the agent didn't preload it; override falls open.
+   */
+  session_phone: string | null;
 }
 
 export function createTurnSession(): TurnSession {
-  return { tecnico_id: null, toolCallCount: 0, candidate_state: null };
+  return {
+    tecnico_id: null,
+    toolCallCount: 0,
+    candidate_state: null,
+    session_phone: null,
+  };
 }
 
 // ---------- Auth-gated tool set ----------
@@ -56,6 +76,7 @@ const AUTH_GATED_TOOLS = new Set([
   "submit_candidate_dossier",
   "mark_candidate_withdrawn",
   "complete_legacy_profile",
+  "classify_documento",
 ]);
 
 // Tools whose args may carry a tecnico_id that the LLM supplied and that MUST
@@ -69,6 +90,17 @@ const TOOLS_WITH_TECNICO_ID_ARG = new Set([
   "submit_candidate_dossier",
   "mark_candidate_withdrawn",
   "complete_legacy_profile",
+]);
+
+// Tools whose `phone` arg names the worker's WA identity (the row's primary
+// phone in tecnicos_extended). These MUST be session-bound to prevent the
+// LLM from substituting a different number the user typed in chat. See
+// TurnSession.session_phone doc above for the Camilo regression that
+// motivated this gate. `escalate_to_hr` is intentionally excluded — HR
+// escalation may reference an arbitrary phone in its payload.
+const TOOLS_WITH_PHONE_ARG = new Set([
+  "identify_user",
+  "register_tecnico",
 ]);
 
 // ---------- Approval-gated tools (Gap A.4 fix) ----------
@@ -230,6 +262,17 @@ export function preDispatch(
     "tecnico_id" in rawArgs
   ) {
     args = { ...rawArgs, tecnico_id: session.tecnico_id };
+  }
+
+  // Rule 2b — session-bound phone override. Same pattern as Rule 2 for
+  // tecnico_id. Forces identify_user / register_tecnico to use the WA jid
+  // the agent already resolved, not whatever the LLM scraped from the chat
+  // body. See TurnSession.session_phone for the Camilo regression context.
+  if (
+    TOOLS_WITH_PHONE_ARG.has(toolName) &&
+    session.session_phone !== null
+  ) {
+    args = { ...args, phone: session.session_phone };
   }
 
   // All checks passed — increment counter and allow.

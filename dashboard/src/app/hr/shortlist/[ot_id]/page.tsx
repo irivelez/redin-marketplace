@@ -8,7 +8,7 @@
 import { serverClientBoundToCookies, serviceClient } from "@/lib/supabase-server";
 import { rankPostulaciones } from "@/lib/ranking";
 import { enqueueWhatsApp, enqueueWhatsAppDocument, tecnicoNotificationContext } from "@/lib/notify";
-import { otTitle, tecnicoLabel } from "@/lib/ot-display";
+import { otTitle, tecnicoLabel, otTotalOrdenCalculado } from "@/lib/ot-display";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import type { ContratoStatus, PostulacionState, WorkerProfile, OtAlcance } from "@redin/shared";
@@ -469,8 +469,13 @@ export default async function HrShortlistPage({ params }: Props) {
         ← pipeline
       </Link>
       <div className="card p-4">
-        <div className="text-sm text-slate-500">
-          {ot?.ciudad ?? "—"} · {ot?.especialidad ?? "—"}
+        <div className="text-sm text-slate-500 flex items-center gap-2 flex-wrap">
+          <span>{ot?.ciudad ?? "—"} · {ot?.especialidad ?? "—"}</span>
+          {otTotalOrdenCalculado(ot?.data).label && (
+            <span className="inline-flex items-center text-[11px] bg-slate-100 text-slate-700 rounded-full px-2 py-0.5 font-medium tabular-nums">
+              {otTotalOrdenCalculado(ot?.data).label}
+            </span>
+          )}
         </div>
         <div className="font-semibold text-slate-900 mt-0.5">{otHeadline}</div>
         <div className="text-sm text-slate-700 mt-1">{ot?.estado ?? "—"}</div>

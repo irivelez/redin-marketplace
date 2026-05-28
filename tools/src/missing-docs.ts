@@ -1,20 +1,22 @@
-// Shared logic for detecting workers with declared-but-not-uploaded
-// mandatory documentation (ARL + EPS).
+// Shared logic for two distinct concerns:
+//   (A) Proactive follow-up chasing — preferred docs (ARL, EPS) that Toño
+//       reminds the worker to upload. Never blocks approval.
+//   (B) Approval gate — the cédula photo is the ONLY doc that blocks
+//       HR's Aprobar click (per Irina 2026-05-24). HR can still override
+//       with a note explaining how cédula was validated offline.
 //
 // Used by:
-//   1. dashboard/src/app/hr/tecnicos/[id]/page.tsx — surfaces "Documentos
-//      pendientes" section + per-doc "Pedir por WhatsApp" button (Gap A.5).
-//   2. sync/src/proactive-followup.ts — daily cron that sends max-2
-//      reminders per worker until either the doc is uploaded or the cap
-//      is hit (Gap A.6).
+//   1. dashboard/src/app/hr/tecnicos/[id]/page.tsx — preferred-docs surface
+//      + per-doc "Pedir por WhatsApp" button (Gap A.5).
+//   2. sync/src/proactive-followup.ts — daily cron, preferred docs only.
+//   3. dashboard/src/lib/decisions.ts — approval gate, cédula only.
 //
-// Policy (per Irina 2026-05-22): ARL and EPS evidence is MANDATORY before
-// approval. Other docs (cert_estudios, cert_trabajos_previos) are
-// optional and surfaced as soft signals but never block.
+// Earlier comment (2026-05-22) said ARL+EPS mandatory; superseded by
+// 2026-05-24 — Redin provides ARL, EPS is preferred-only.
 
 import type { ServerClient } from "@redin/shared";
 
-// Doc tipo enum matches upload_documento.ts allowed types.
+// "Preferred" docs the proactive follow-up cron chases. Never blocks approval.
 export type MandatoryDocType = "evidencia_arl" | "evidencia_eps";
 
 export interface MissingDoc {
@@ -134,6 +136,27 @@ export async function findWorkersWithMissingMandatoryDocs(
     if (result && result.missing.length > 0) out.push(result);
   }
   return out;
+}
+
+// Approval gate — is the worker's cédula photo uploaded?
+//
+// Cédula photo is the ONLY mandatory doc blocking the Aprobar click
+// (per Irina 2026-05-24). All other docs are preferred-only. HR can
+// still approve without a cédula by supplying a hr_reasoning note in
+// the form (override audit). The dashboard server action enforces this;
+// don't add client-side bypass.
+export async function hasCedulaUploaded(
+  supa: ServerClient,
+  tecnicoId: string
+): Promise<boolean> {
+  const { data } = await supa
+    .from("documentos")
+    .select("id")
+    .eq("tecnico_id", tecnicoId)
+    .eq("tipo", "cedula")
+    .limit(1)
+    .maybeSingle();
+  return !!data;
 }
 
 // Count how many `tono_doc_followup` events have been logged for this

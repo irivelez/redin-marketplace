@@ -32,11 +32,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.41.0",
+    "@google/generative-ai": "^0.24.1",
     "@redin/shared": "*",
     "@supabase/supabase-js": "^2.46.1"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
   }
 }

@@ -22,7 +22,7 @@
 
 import { serverClientBoundToCookies, serviceClient } from "@/lib/supabase-server";
 import { rankPostulaciones } from "@/lib/ranking";
-import { otTitle, tecnicoLabel } from "@/lib/ot-display";
+import { otTitle, tecnicoLabel, otTotalOrdenCalculado } from "@/lib/ot-display";
 import { signOtPublicToken } from "@/lib/public-token";
 import { OFFERABLE_ESTADO } from "@redin/tools/read-pending-ots";
 import type { PostulacionRow, ContratoStatus, WorkerProfile, OtAlcance } from "@redin/shared";
@@ -441,6 +441,11 @@ export default async function HrPipelinePage() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 text-sm text-slate-500">
                     <span>{ot.ciudad ?? "—"} · {ot.especialidad ?? "—"}</span>
+                    {otTotalOrdenCalculado(ot.data).label && (
+                      <span className="inline-flex items-center text-[11px] bg-slate-100 text-slate-700 rounded-full px-2 py-0.5 font-medium tabular-nums">
+                        {otTotalOrdenCalculado(ot.data).label}
+                      </span>
+                    )}
                     {hasAlcance ? (
                       <span className="inline-flex items-center gap-0.5 text-[11px] bg-emerald-100 text-emerald-700 rounded-full px-2 py-0.5 font-medium">
                         ✓ alcance

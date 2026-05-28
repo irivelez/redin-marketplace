@@ -34,6 +34,7 @@ import type {
 } from "./types";
 import { err, ok } from "./types";
 import type { CandidateState, HrAction } from "@redin/shared/dossier-types";
+import { normalizePhone } from "@redin/shared";
 
 interface ShimInput {
   tecnico_id: string;
@@ -183,9 +184,98 @@ export async function setQualificationState(
     });
   }
 
+  // B5: Pedir llamada → WA notification.
+  // When the shim flips to needs_call, enqueue a WhatsApp message to the
+  // worker so they know the team will call them. Idempotent: skip if a
+  // pedir_llamada_notification was already enqueued within the last 24 hours.
+  if (map.resulting_state === "needs_call") {
+    await enqueuePedirLlamada(ctx, tec.tecnico_id, actor);
+  }
+
   return ok({
     tecnico_id: tec.tecnico_id,
     state: legacyState as SetQualificationStateOutput["state"],
     prior_state: priorState,
   });
+}
+
+async function enqueuePedirLlamada(
+  ctx: ToolContext,
+  tecnicoId: string,
+  actor: string
+): Promise<void> {
+  const { data: tecRow, error: tecErr } = await ctx.supabase
+    .from("tecnicos_extended")
+    .select("phone")
+    .eq("tecnico_id", tecnicoId)
+    .maybeSingle();
+
+  if (tecErr || !tecRow) {
+    ctx.logger.warn("pedir_llamada_notification: could not look up worker phone (skipped)", {
+      tecnico_id: tecnicoId,
+      error: tecErr?.message ?? "not found",
+    });
+    return;
+  }
+
+  const rawPhone = (tecRow as { phone: string | null }).phone ?? "";
+  const phone = normalizePhone(rawPhone);
+  if (!phone) {
+    ctx.logger.warn("pedir_llamada_notification: worker has no phone (skipped)", {
+      tecnico_id: tecnicoId,
+    });
+    return;
+  }
+
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  // Idempotency: check meta->>'notification_type' via a Postgres filter.
+  // outbound_messages.kind is "text"|"document" (the WA send mode, not notification type).
+  // notification_type is stored in meta so we can discriminate without a new column.
+  const { data: existing } = await ctx.supabase
+    .from("outbound_messages")
+    .select("id")
+    .eq("phone", phone)
+    .gte("created_at", twentyFourHoursAgo)
+    .contains("meta", { notification_type: "pedir_llamada_notification" })
+    .maybeSingle();
+
+  if (existing) {
+    ctx.logger.warn("pedir_llamada_notification: already sent within 24h (skipped)", {
+      tecnico_id: tecnicoId,
+    });
+    return;
+  }
+
+  const body =
+    "Hola, soy Toño de Redin. El equipo va a llamarte pronto para conocerte mejor antes de avanzar con tu perfil. Mantente atento a tu celular.";
+
+  const { error: insertErr } = await ctx.supabase.from("outbound_messages").insert({
+    phone,
+    body,
+    channel: "whatsapp",
+    kind: "text",
+    meta: {
+      notification_type: "pedir_llamada_notification",
+      tecnico_id: tecnicoId,
+      scheduled_by: actor,
+    },
+  });
+
+  if (insertErr) {
+    ctx.logger.warn("pedir_llamada_notification: outbound_messages insert failed", {
+      tecnico_id: tecnicoId,
+      error: insertErr.message,
+    });
+  } else {
+    await recordEvent(ctx, {
+      type: "pedir_llamada_notification_enqueued",
+      entity_id: tecnicoId,
+      actor: ctx.defaultActor,
+      meta: { phone, scheduled_by: actor },
+    }).catch((e) => {
+      ctx.logger.warn("pedir_llamada_notification: evento insert failed (non-fatal)", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    });
+  }
 }

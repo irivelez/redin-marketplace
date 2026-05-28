@@ -289,3 +289,27 @@ export interface LogEventInput {
 export interface LogEventOutput {
   evento_id: string;
 }
+
+// ---------- classify_documento ----------
+export interface ClassifyDocumentoInput {
+  documento_id: string;
+  // The tipo the worker/agent claimed when uploading. Used to compute
+  // matches_expected (loose match). Defaults to the stored tipo if omitted.
+  expected_tipo?: string;
+}
+export interface ClassifyDocumentoOutput {
+  // One of: cedula | cert_electrica | arl | ss | altura | antecedentes |
+  // cert_estudios | cert_trabajos_previos | evidencia_arl | evidencia_eps |
+  // paz_y_salvo | contrato | otro | unreadable
+  classified_type: string;
+  // true if classified_type matches expected_tipo (loose: evidencia_arl ~ arl, etc.)
+  matches_expected: boolean;
+  // Gemini's self-reported confidence [0, 1]
+  confidence: number;
+  // SECURITY (2026-05-28): extracted_fields used to live here but contained
+  // PII (cedula number, EPS/ARL provider names, fechas). Returning that to
+  // the LLM was a Habeas Data Ley 1581 exposure — the LLM can echo it into
+  // a worker's WA reply. Full payload is still persisted to
+  // documentos.classification_jsonb for HR's DocViewer; only the chat-facing
+  // contract is narrowed. Discrepancies surfaced through HR dashboard, not Toño.
+}

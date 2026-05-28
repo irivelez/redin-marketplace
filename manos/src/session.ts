@@ -8,7 +8,7 @@ import type { Json, MessageRole, SessionChannel, SessionRow, MessageRow } from "
 const log = createLogger("manos:session");
 
 export const SESSION_TTL_MIN = 60;
-export const CONTEXT_WINDOW = 24;
+export const CONTEXT_WINDOW = 80;
 
 export class SessionStore {
   constructor(private supabase: ServerClient) {}

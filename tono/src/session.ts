@@ -8,7 +8,15 @@ import type { Json, MessageRole, SessionChannel, SessionRow, MessageRow } from "
 const log = createLogger("tono:session");
 
 export const SESSION_TTL_MIN = 60;
-export const CONTEXT_WINDOW = 24; // how many most-recent messages we feed back to Gemini
+// Most-recent message rows we feed back to Haiku each turn. Each LLM turn
+// generates 2-3 message rows (user input + assistant text + optional tool_use),
+// so 80 messages ≈ 25-30 conversational turns. The previous value (24) was
+// sized for Gemini's PRD §19 spec and caused a real bug in Carlos's screening
+// (2026-05-25): by turn 22 the cédula intake from turn 9 had dropped out of
+// context, Toño re-asked for the cédula number AND for the photos, and the
+// worker saw a one-sided conversation. Long-term fix is a "collected_so_far"
+// summary block that survives truncation; bumping the window is the day-1 patch.
+export const CONTEXT_WINDOW = 80;
 
 export class SessionStore {
   constructor(private supabase: ServerClient) {}

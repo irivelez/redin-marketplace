@@ -10,7 +10,7 @@ import {
 import { makeDefaultToolContext } from "@redin/tools";
 import { handleMessage } from "./agent";
 import { KeyedMutex } from "./mutex";
-import { startOutboundDrainer } from "./outbound";
+import { sendAgentReply, startOutboundDrainer } from "./outbound";
 import { TelegramEscalationSink } from "./telegram-escalation";
 import { WhatsAppClient, defaultAuthDir } from "./whatsapp";
 
@@ -62,7 +62,16 @@ async function main() {
               tools: result.tool_calls.map((t) => `${t.name}:${t.result_ok ? "ok" : "err"}`).join(","),
             });
             if (result.reply.trim()) {
-              await wa.sendText(jid, result.reply);
+              // sendAgentReply persists to outbound_messages FIRST, then
+              // attempts a direct send. If Baileys is mid-reconnect the row
+              // stays pending and the drainer retries — no more silently
+              // lost replies during 440 storms.
+              await sendAgentReply(supabase, wa, {
+                phone,
+                jid,
+                body: result.reply,
+                meta: { source: "tono_agent", session_id: result.session_id },
+              });
             }
           })
           .catch((e) => {
@@ -70,12 +79,15 @@ async function main() {
               phone,
               error: e instanceof Error ? e.message : String(e),
             });
-            // Try to send a soft fallback so the user isn't left hanging.
-            wa.sendText(
+            // Resilient fallback so the user isn't left hanging even if
+            // Baileys is down right now — the drainer will retry on reconnect.
+            sendAgentReply(supabase, wa, {
+              phone,
               jid,
-              "Hoy tuve un problema técnico. Inténtame en un rato y te ayudo."
-            ).catch(() => {
-              /* ignore */
+              body: "Hoy tuve un problema técnico. Inténtame en un rato y te ayudo.",
+              meta: { source: "tono_fallback" },
+            }).catch(() => {
+              /* last resort — already logged inside the helper */
             });
           });
       },

@@ -47,10 +47,31 @@ export interface WhatsAppHandlers {
     phone: string;
     text: string;
     jid: string;
-    media?: InboundMedia;
+    media?: InboundMedia[];
   }) => Promise<void>;
   onReady?: () => void | Promise<void>;
 }
+
+// Per-phone batching buffer (see handleIncoming / flushBatch).
+// Baileys delivers each photo as a separate `messages.upsert`. Without
+// batching, sending N photos = N parallel LLM turns and only the first
+// reply ships. We accumulate consecutive messages from the same sender
+// inside an idle debounce window and emit ONE onMessage with the joined
+// text + media[]. Two timers: `idleTimer` resets on each new message
+// (typical "user is still attaching stuff" case), `maxAgeTimer` is set
+// once on the first message of the batch and forces a flush even if the
+// user keeps trickling files (anti-starvation).
+interface PendingBatch {
+  jid: string;
+  texts: string[];
+  medias: InboundMedia[];
+  idleTimer: NodeJS.Timeout;
+  maxAgeTimer: NodeJS.Timeout;
+  firstAt: number;
+}
+
+const BATCH_IDLE_MS = 2000;
+const BATCH_MAX_AGE_MS = 8000;
 
 export interface WhatsAppOptions {
   authDir: string;
@@ -65,6 +86,8 @@ export interface WhatsAppOptions {
 export class WhatsAppClient {
   private sock: WASocket | null = null;
   private reconnecting = false;
+  private seenMessageIds = new Set<string>();
+  private pending = new Map<string, PendingBatch>();
 
   constructor(private opts: WhatsAppOptions) {
     fs.mkdirSync(opts.authDir, { recursive: true });
@@ -104,6 +127,22 @@ export class WhatsAppClient {
   }
 
   async stop(): Promise<void> {
+    // Best-effort flush so in-flight batches don't get silently dropped on
+    // shutdown. Flush THEN clear timers (flushBatch already clears its own
+    // timers), but defensively walk remaining entries too in case flushBatch
+    // throws synchronously before clearing.
+    for (const phone of Array.from(this.pending.keys())) {
+      try {
+        this.flushBatch(phone);
+      } catch (e) {
+        log.error("flushBatch on stop failed", { phone, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.idleTimer);
+      clearTimeout(entry.maxAgeTimer);
+    }
+    this.pending.clear();
     if (this.sock) {
       try {
         await this.sock.logout();
@@ -147,6 +186,16 @@ export class WhatsAppClient {
       this.opts.handlers.onReady?.();
     }
     if (connection === "close") {
+      // Best-effort: drain pending batches before tearing down. If we don't,
+      // any photo/text accumulated in the last ≤2s of debounce window dies
+      // with the socket and the user gets no reply at all on next reconnect.
+      for (const phone of Array.from(this.pending.keys())) {
+        try {
+          this.flushBatch(phone);
+        } catch (e) {
+          log.error("flushBatch on disconnect failed", { phone, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
       const statusCode = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       log.warn("disconnected", { statusCode, loggedOut });
@@ -170,7 +219,46 @@ export class WhatsAppClient {
 
   private async handleIncoming(msg: WAMessage): Promise<void> {
     if (msg.key.fromMe) return;
+
+    // LID-mode self-loop guard (added 2026-05-26 after credit-exhaustion incident).
+    // WhatsApp history-sync can replay the bot's OWN outbound messages back to
+    // Baileys with key.fromMe inconsistently set on accounts that use LID (Linked
+    // Identity). Without this check, phoneFromJid extracts the bot's own LID as a
+    // "user phone" and the bot enters an infinite self-reply loop. Compare
+    // remoteJid against the socket's own id + lid, stripping device suffix.
+    const remoteJid = msg.key.remoteJid ?? "";
+    const user = this.sock?.user as { id?: string; lid?: string } | undefined;
+    const stripIdDeviceAndDomain = (s: string): string =>
+      (s.split(":")[0] ?? "").split("@")[0] ?? "";
+    const remoteBase = stripIdDeviceAndDomain(remoteJid);
+    if (remoteBase) {
+      const ownIds: string[] = [];
+      if (user?.id) ownIds.push(user.id);
+      if (user?.lid) ownIds.push(user.lid);
+      if (ownIds.some((o) => stripIdDeviceAndDomain(o) === remoteBase)) {
+        log.warn("dropped inbound from own identity (LID self-loop guard)", { remoteJid });
+        return;
+      }
+    }
+
     if (!msg.message) return;
+
+    // Inbound dedup. Baileys redelivers the same message on network glitches
+    // (m.type='append' after a missed 'notify', or a remote retry from
+    // WhatsApp). Without this guard the runner processes the same inbound
+    // twice in a row, and the LLM emits a near-identical duplicate reply —
+    // observed in Carlos's 2026-05-25 screening where the same Toño message
+    // arrived twice 1 second apart. Set is bounded to avoid unbounded growth.
+    const msgId = msg.key.id;
+    if (msgId) {
+      if (this.seenMessageIds.has(msgId)) return;
+      this.seenMessageIds.add(msgId);
+      if (this.seenMessageIds.size > 500) {
+        const firstHalf = Array.from(this.seenMessageIds).slice(0, 250);
+        for (const id of firstHalf) this.seenMessageIds.delete(id);
+      }
+    }
+
     const jid = msg.key.remoteJid ?? "";
     if (!jid || jid.endsWith("@g.us")) return; // skip groups in v1
     const phone = phoneFromJid(jid);
@@ -196,12 +284,7 @@ export class WhatsAppClient {
       });
       if (media) media.caption = caption;
       const text = caption.length > 0 ? caption : "[foto]";
-      await this.opts.handlers.onMessage({
-        phone,
-        text,
-        jid,
-        media: media ?? undefined,
-      });
+      this.enqueue(phone, jid, text, media);
       return;
     }
 
@@ -227,12 +310,7 @@ export class WhatsAppClient {
       });
       if (media) media.caption = caption;
       const text = caption.length > 0 ? caption : `[documento: ${fileName}]`;
-      await this.opts.handlers.onMessage({
-        phone,
-        text,
-        jid,
-        media: media ?? undefined,
-      });
+      this.enqueue(phone, jid, text, media);
       return;
     }
 
@@ -248,7 +326,67 @@ export class WhatsAppClient {
       log.warn("inbound message truncated", { phone, original_len: text.length, cap: INPUT_CAPS.whatsapp });
       safeText = text.slice(0, INPUT_CAPS.whatsapp);
     }
-    await this.opts.handlers.onMessage({ phone, text: safeText, jid });
+    this.enqueue(phone, jid, safeText, null);
+  }
+
+  // Push a single processed message (text + optional media) into the
+  // per-phone batch. Idle timer is reset on each call; max-age timer is
+  // armed exactly once when the batch is created. Both timers call
+  // flushBatch, which is idempotent w.r.t. the entry being gone (it just
+  // returns early). Note: we accept null media (text-only) but text-only
+  // messages with empty text were already rejected by the caller.
+  private enqueue(phone: string, jid: string, text: string, media: InboundMedia | null): void {
+    let entry = this.pending.get(phone);
+    if (!entry) {
+      const now = Date.now();
+      const idleTimer = setTimeout(() => this.flushBatch(phone), BATCH_IDLE_MS);
+      const maxAgeTimer = setTimeout(() => this.flushBatch(phone), BATCH_MAX_AGE_MS);
+      entry = {
+        jid,
+        texts: [],
+        medias: [],
+        idleTimer,
+        maxAgeTimer,
+        firstAt: now,
+      };
+      this.pending.set(phone, entry);
+    } else {
+      clearTimeout(entry.idleTimer);
+      entry.idleTimer = setTimeout(() => this.flushBatch(phone), BATCH_IDLE_MS);
+    }
+    if (text.length > 0) entry.texts.push(text);
+    if (media) entry.medias.push(media);
+  }
+
+  // Drain the per-phone batch into a single onMessage call. MUST clear
+  // timers and remove the map entry BEFORE awaiting onMessage so that:
+  //  (a) a second flush triggered by the other timer is a no-op, and
+  //  (b) any new message arriving while onMessage is in-flight starts a
+  //      fresh batch with its own timers (caller's KeyedMutex serializes
+  //      the resulting LLM turns per-phone).
+  private flushBatch(phone: string): void {
+    const entry = this.pending.get(phone);
+    if (!entry) return;
+    clearTimeout(entry.idleTimer);
+    clearTimeout(entry.maxAgeTimer);
+    this.pending.delete(phone);
+    if (entry.texts.length === 0 && entry.medias.length === 0) return;
+    const joinedText = entry.texts.join("\n");
+    this.opts.handlers
+      .onMessage({
+        phone,
+        text: joinedText,
+        jid: entry.jid,
+        media: entry.medias.length > 0 ? entry.medias : undefined,
+      })
+      .catch((e) => {
+        log.error("batched onMessage failed", {
+          phone,
+          error: e instanceof Error ? e.message : String(e),
+          texts: entry.texts.length,
+          medias: entry.medias.length,
+        });
+      });
   }
 
   // Downloads inbound media to Supabase Storage under

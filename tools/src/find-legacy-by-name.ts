@@ -108,7 +108,7 @@ export async function findLegacyByName(
       matches,
       next_action: "escalate_legacy_reconciliation",
       suggested_reply:
-        "Posible coincidencia con un técnico legacy. Escalando a RRHH para verificar.",
+        "Posible coincidencia con un técnico legacy. Escalando a nuestra área de talento humano para verificar.",
     });
   }
   return ok({

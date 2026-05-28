@@ -13,6 +13,8 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { phoneDisplay } from "@/lib/phone-display";
 import { getMissingDocsForWorker } from "@redin/tools/missing-docs";
+import { DocViewer } from "./DocViewer";
+import type { DocViewerItem, DocViewerGroup, ClassificationJsonb } from "./DocViewer";
 
 export const dynamic = "force-dynamic";
 
@@ -180,7 +182,8 @@ export default async function TecnicoDetailPage({
       .limit(100),
     // Gap A.5/A.6 follow-up — all documents uploaded by this worker. HR
     // needs visibility into what evidence has actually been received so
-    // they can validate and approve.
+    // they can validate and approve. classification_jsonb is added by
+    // Lane B migration 016; gracefully absent until that migration lands.
     supa
       .from("documentos")
       .select("id, tipo, storage_path, uploaded_at, validated_by, validated_at")
@@ -198,7 +201,125 @@ export default async function TecnicoDetailPage({
   const contratos = contratosRes.data ?? [];
   const evaluations = evaluationsRes.data ?? [];
   const events = eventsRes.data ?? [];
-  const documentos = documentosRes.data ?? [];
+  const documentosBase = documentosRes.data ?? [];
+
+  // Fetch classification_jsonb separately — column added by migration 016 (Lane B).
+  // Uses service client with explicit cast so it compiles before the migration lands.
+  // Returns an empty map if the column doesn't exist yet (graceful degrade).
+  type ClassificationRow = { id: string; classification_jsonb: unknown };
+  const classificationByDocId = new Map<string, unknown>();
+  if (documentosBase.length > 0) {
+    try {
+      const docIds = documentosBase.map((d) => d.id);
+      const { data: classRows } = await (supa as unknown as {
+        from: (t: string) => {
+          select: (s: string) => {
+            in: (col: string, vals: string[]) => Promise<{ data: ClassificationRow[] | null }>;
+          };
+        };
+      })
+        .from("documentos")
+        .select("id, classification_jsonb")
+        .in("id", docIds);
+      for (const row of classRows ?? []) {
+        if (row.classification_jsonb != null) {
+          classificationByDocId.set(row.id, row.classification_jsonb);
+        }
+      }
+    } catch {
+      // Column doesn't exist yet — no-op.
+    }
+  }
+
+  const documentosRaw = documentosBase;
+
+  // Signed URLs expire in 600s (10 min). Per-item failure → null, not a page crash.
+  const TIPO_LABEL_MAP: Record<string, string> = {
+    cedula: "Cédula",
+    evidencia_arl: "ARL",
+    arl: "ARL",
+    evidencia_eps: "EPS / SS",
+    ss: "EPS / SS",
+    altura: "Certificado alturas",
+    cert_electrica: "Cert. eléctrica",
+    antecedentes: "Antecedentes",
+    cert_estudios: "Cert. estudios",
+    cert_trabajos_previos: "Trabajos previos",
+    otro: "Otros",
+  };
+
+  const TIPO_ORDER = [
+    "cedula",
+    "evidencia_arl",
+    "arl",
+    "evidencia_eps",
+    "ss",
+    "altura",
+    "cert_electrica",
+    "antecedentes",
+    "cert_estudios",
+    "cert_trabajos_previos",
+    "otro",
+  ];
+
+  const documentoItems: DocViewerItem[] = await Promise.all(
+    documentosRaw.map(async (d) => {
+      let signedUrl: string | null = null;
+      try {
+        const { data: urlData } = await supa.storage
+          .from("documentos")
+          .createSignedUrl(d.storage_path, 600);
+        signedUrl = urlData?.signedUrl ?? null;
+      } catch {
+        signedUrl = null;
+      }
+
+      const rawClassification = classificationByDocId.get(d.id) ?? null;
+      let classification: ClassificationJsonb | null = null;
+      if (rawClassification && typeof rawClassification === "object" && !Array.isArray(rawClassification)) {
+        const c = rawClassification as Record<string, unknown>;
+        classification = {
+          classified_type: typeof c.classified_type === "string" ? c.classified_type : null,
+          confidence: typeof c.confidence === "number" ? c.confidence : null,
+          matches_expected: typeof c.matches_expected === "boolean" ? c.matches_expected : null,
+          extracted_fields:
+            c.extracted_fields && typeof c.extracted_fields === "object" && !Array.isArray(c.extracted_fields)
+              ? (c.extracted_fields as Record<string, string | null>)
+              : null,
+          error: typeof c.error === "string" ? c.error : null,
+        };
+      }
+
+      return {
+        id: d.id,
+        tecnico_id: tecnicoId,
+        tipo: d.tipo as string,
+        tipo_label: TIPO_LABEL_MAP[d.tipo as string] ?? (d.tipo as string),
+        storage_path: d.storage_path,
+        uploaded_at: d.uploaded_at,
+        validated_by: d.validated_by as string | null,
+        validated_at: d.validated_at as string | null,
+        signed_url: signedUrl,
+        classification_jsonb: classification,
+      } satisfies DocViewerItem;
+    })
+  );
+
+  const groupMap = new Map<string, DocViewerItem[]>();
+  const groupOrder: string[] = [];
+  for (const item of documentoItems) {
+    const tipoKey = TIPO_ORDER.includes(item.tipo) ? item.tipo : "otro";
+    const label = TIPO_LABEL_MAP[tipoKey] ?? item.tipo_label;
+    if (!groupMap.has(label)) {
+      groupMap.set(label, []);
+      groupOrder.push(label);
+    }
+    groupMap.get(label)!.push(item);
+  }
+  const docViewerGroups: DocViewerGroup[] = groupOrder.map((label) => ({
+    label,
+    docs: groupMap.get(label)!,
+  }));
 
   // OT lookup for postulaciones, contratos, and evaluaciones — every list
   // below renders the OT human title (descripcion fallback ciudad) as primary.
@@ -496,79 +617,13 @@ export default async function TecnicoDetailPage({
         </div>
       )}
 
-      {/* Documentos subidos — Gap A.5 follow-up
-          Shows every document the worker has uploaded so HR can actually
-          view the evidence and validate. Click → inline view (image/PDF).
-          Most-recent first. The "Documentos pendientes" card above auto-
-          excludes types that appear here (uploaded-after-dossier override
-          in getMissingDocsForWorker). */}
-      {documentos.length > 0 && (
-        <div className="card p-4 border-l-4 border-emerald-400 bg-emerald-50">
-          <div className="text-xs uppercase tracking-wide text-emerald-700 mb-2">
-            Documentos subidos — {documentos.length} {documentos.length === 1 ? "archivo" : "archivos"}
-          </div>
-          <ul className="space-y-2">
-            {documentos.map((d) => {
-              const tipoLabel: Record<string, string> = {
-                evidencia_arl: "Evidencia ARL",
-                evidencia_eps: "Evidencia EPS",
-                cedula: "Cédula",
-                cert_estudios: "Certificado de estudios",
-                cert_trabajos_previos: "Trabajos previos",
-                cert_electrica: "Certificación eléctrica",
-                arl: "ARL (legacy)",
-                ss: "Seguridad social",
-                altura: "Certificado de alturas",
-                antecedentes: "Antecedentes",
-                otro: "Otro",
-              };
-              const label = tipoLabel[d.tipo as string] ?? d.tipo;
-              const validated = !!d.validated_at;
-              const ext = d.storage_path.split(".").pop()?.toLowerCase() ?? "";
-              const isImage = ["jpg", "jpeg", "png", "webp"].includes(ext);
-              return (
-                <li
-                  key={d.id}
-                  className="flex items-center justify-between gap-3 text-sm bg-white border border-emerald-200 rounded px-3 py-2"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-slate-800">{label}</span>
-                      <span className="text-[11px] text-slate-500 truncate font-mono">
-                        {d.storage_path.split("/").pop()}
-                      </span>
-                      {validated ? (
-                        <span className="text-[11px] bg-emerald-100 text-emerald-700 rounded px-1.5 py-0.5">
-                          ✓ validado
-                        </span>
-                      ) : (
-                        <span className="text-[11px] bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">
-                          sin validar
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">
-                      subido {fmt(d.uploaded_at)}
-                      {validated && d.validated_by && <> · validado por {d.validated_by} ({fmt(d.validated_at)})</>}
-                    </div>
-                  </div>
-                  <a
-                    href={`/api/documentos/${d.id}/view`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="shrink-0 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-md px-3 py-1.5"
-                  >
-                    {isImage ? "Ver foto" : "Ver documento"}
-                  </a>
-                </li>
-              );
-            })}
-          </ul>
-          <div className="text-[11px] text-emerald-700 mt-3">
-            Tip: el link abre el archivo en una pestaña nueva. Imágenes y PDFs se renderizan inline.
-          </div>
-        </div>
-      )}
+      {/* Documentos subidos */}
+      <div className="space-y-2">
+        <h2 className="font-semibold text-slate-900">
+          Documentos ({documentoItems.length})
+        </h2>
+        <DocViewer groups={docViewerGroups} />
+      </div>
 
       {/* Add HR note */}
       <div className="card p-3">
@@ -806,6 +861,53 @@ export default async function TecnicoDetailPage({
 // Timeline renderers
 // ---------------------------------------------------------------------------
 
+const CERT_BADGES: ReadonlyArray<readonly [string, string]> = [
+  ["altura", "Trabajo en alturas"],
+  ["altura_avanzado", "Alturas avanzado"],
+  ["retie", "RETIE"],
+  ["andamios", "Andamios"],
+  ["soldadura", "Soldadura"],
+  ["conte", "Conte"],
+  ["siso", "Curso SISO"],
+];
+
+function renderCertBadges(payload: unknown): JSX.Element | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const certs = (payload as Record<string, unknown>).certificaciones;
+  if (!certs || typeof certs !== "object" || Array.isArray(certs)) return null;
+  const c = certs as Record<string, unknown>;
+
+  const active = CERT_BADGES.filter(([key]) => c[key] === true);
+  const otrasRaw = typeof c.otras === "string" ? c.otras.trim() : "";
+  if (active.length === 0 && otrasRaw.length === 0) return null;
+
+  const otras =
+    otrasRaw.length > 30 ? `${otrasRaw.slice(0, 30)}…` : otrasRaw;
+
+  return (
+    <div className="mt-2">
+      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
+        Certificaciones
+      </div>
+      <div className="mt-1 flex flex-wrap gap-1.5">
+        {active.map(([key, label]) => (
+          <span
+            key={key}
+            className="bg-emerald-100 text-emerald-800 text-xs font-medium px-2 py-0.5 rounded"
+          >
+            {label}
+          </span>
+        ))}
+        {otras && (
+          <span className="bg-slate-100 text-slate-700 text-xs font-medium px-2 py-0.5 rounded">
+            Otras: {otras}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function renderDossier(payload: unknown): JSX.Element {
   const d = payload as {
     id: string;
@@ -835,6 +937,7 @@ function renderDossier(payload: unknown): JSX.Element {
         cédula {d.cedula}
         {d.prompt_sha && <> · prompt_sha {d.prompt_sha.slice(0, 12)}</>}
       </div>
+      {renderCertBadges(d.payload)}
       <details className="mt-1 text-[11px] text-slate-600">
         <summary className="cursor-pointer">payload completo</summary>
         <pre className="mt-1 whitespace-pre-wrap break-all">

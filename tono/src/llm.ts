@@ -38,7 +38,12 @@ export class ModelUnavailableError extends Error {
 
 const log = createLogger("tono:llm");
 
-const MODEL = "claude-haiku-4-5";
+// 2026-05-25: Model is env-overridable so we can swap Haiku 4.5 → Sonnet 4.5
+// (or revert) without a code change. Default stays Haiku 4.5 to preserve
+// behavior if env is unset/empty. eventos.meta.model logs the actual model
+// per LLM call (see logLlmCall). To activate Sonnet: set TONO_MODEL=claude-sonnet-4-5
+// in .env.local. To revert: remove or set back to claude-haiku-4-5.
+const MODEL = process.env.TONO_MODEL?.trim() || "claude-haiku-4-5";
 const TIMEOUT_MS = 45_000; // bumped from 30s — thinking turns can take longer
 const MAX_TOOL_ITERATIONS = 6;
 
@@ -62,13 +67,15 @@ const THINKING_ENABLED = (() => {
 })();
 
 // Budget for the hidden reasoning. Min 1024 (Anthropic API constraint).
-// 2000 is the sweet spot for our screening-style decisions per
-// docs.anthropic.com/en/docs/build-with-claude/extended-thinking.
+// 2026-05-28: dropped default 2000 → 1024 after Julian's live test showed
+// 12.6s avg turn latency. Lower budget shaves ~2-3s per turn while keeping
+// thinking mode's edge-case handling. Eval suite (when wired post-pilot)
+// will be the gate for tuning higher.
 const THINKING_BUDGET = (() => {
   const raw = process.env.TONO_THINKING_BUDGET;
-  if (!raw) return 2000;
+  if (!raw) return 1024;
   const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 1024) return 2000;
+  if (!Number.isFinite(n) || n < 1024) return 1024;
   return n;
 })();
 
@@ -190,15 +197,39 @@ function lowercaseTypes(node: unknown): unknown {
   return out;
 }
 
+// 2026-05-27: Anthropic prompt caching enabled (see Decisions log + handoff).
+// Adding `cache_control: ephemeral` on the LAST tool definition marks the
+// ENTIRE tools block as cacheable. Anthropic caches everything up to and
+// including the marked block, so this one breakpoint covers all ~3.5k tokens
+// of tool schemas. Cache TTL is 5 min — repeated turns within the same
+// conversation hit the cache (90% input-token discount + 0 ITPM impact).
+//
+// Reference: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 function toolsForAnthropic(): Anthropic.Tool[] {
-  return TOOL_DECLARATIONS.map(
-    (d) =>
-      ({
-        name: d.name,
-        description: d.description,
-        input_schema: lowercaseTypes(d.parameters) as Anthropic.Tool["input_schema"],
-      }) satisfies Anthropic.Tool
-  );
+  const tools: Anthropic.Tool[] = TOOL_DECLARATIONS.map((d) => ({
+    name: d.name,
+    description: d.description,
+    input_schema: lowercaseTypes(d.parameters) as Anthropic.Tool["input_schema"],
+  }));
+  if (tools.length > 0) {
+    tools[tools.length - 1]!.cache_control = { type: "ephemeral" };
+  }
+  return tools;
+}
+
+// 2026-05-27: Anthropic prompt caching for the system prompt.
+// Wraps TONO_SYSTEM_PROMPT (~11k tokens) in a single text block with a
+// cache breakpoint. Combined with the tools-block cache above, ~14k of
+// the ~21k per-call input tokens hit the cache after the first call in a
+// 5-min window. Drops effective ITPM cost per call from 21k → ~1-2k.
+function systemForAnthropic(): Anthropic.TextBlockParam[] {
+  return [
+    {
+      type: "text",
+      text: TONO_SYSTEM_PROMPT,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
 }
 
 // Convert ConversationTurn[] (our persisted shape) to Anthropic MessageParam[].
@@ -401,11 +432,12 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     try {
       // Gap A.3: build params conditionally. With thinking enabled,
       // temperature must be omitted (API rejects the combination).
+      const system = systemForAnthropic();
       const params: Anthropic.MessageCreateParamsNonStreaming = THINKING_ENABLED
         ? {
             model: MODEL,
             max_tokens: MAX_TOKENS,
-            system: TONO_SYSTEM_PROMPT,
+            system,
             tools,
             messages,
             thinking: {
@@ -417,7 +449,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
             model: MODEL,
             max_tokens: MAX_TOKENS,
             temperature: TEMPERATURE,
-            system: TONO_SYSTEM_PROMPT,
+            system,
             tools,
             messages,
           };

@@ -14,3 +14,6 @@ qa/reports/*
 !qa/reports/.gitkeep
 supabase/
 .claude/
+.omo/run-continuation/
+.playwright-mcp/
+/qa-*.png

@@ -42,9 +42,14 @@ function descripcionFrom(data: Json): string {
   return "";
 }
 
+// 2026-05-28: source column switched Valor_Estimado → Total_Orden_Calculado
+// per HR. Workers see the calculated total (post-cotización), not the initial
+// estimate, when Toño offers jobs. Output field name kept as valor_estimado
+// to avoid rippling through types, prompts, and the Manos architect tool
+// (which still reads Valor_Estimado intentionally — different audience).
 function valorEstimadoFrom(data: Json): { num: number | null; label: string | null } {
   if (!data || typeof data !== "object" || Array.isArray(data)) return { num: null, label: null };
-  const raw = (data as Record<string, unknown>).Valor_Estimado;
+  const raw = (data as Record<string, unknown>).Total_Orden_Calculado;
   if (typeof raw !== "string") return { num: null, label: null };
   const num = Number.parseFloat(raw.replace(/[^\d.-]/g, ""));
   if (!Number.isFinite(num) || num <= 0) return { num: null, label: null };

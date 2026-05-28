@@ -309,6 +309,9 @@ export type DocumentoRow = {
   validated_by: string | null;
   validated_at: string | null;
   uploaded_at: string;
+  classification_jsonb: Json | null;
+  classified_at: string | null;
+  classifier_model: string | null;
 };
 
 export type EventoRow = {

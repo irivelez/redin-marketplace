@@ -10,7 +10,7 @@ import {
 import { makeDefaultToolContext } from "@redin/tools";
 import { handleManosMessage } from "./agent";
 import { KeyedMutex } from "./mutex";
-import { startOutboundDrainer } from "./outbound";
+import { sendAgentReply, startOutboundDrainer } from "./outbound";
 import { TelegramEscalationSink } from "./telegram-escalation";
 import { WhatsAppClient, defaultAuthDir } from "./whatsapp";
 
@@ -68,7 +68,12 @@ async function main() {
                 .join(","),
             });
             if (result.reply.trim()) {
-              await wa.sendText(jid, result.reply);
+              await sendAgentReply(supabase, wa, {
+                phone,
+                jid,
+                body: result.reply,
+                meta: { source: "manos_agent", session_id: result.session_id },
+              });
             }
           })
           .catch((e) => {
@@ -76,11 +81,13 @@ async function main() {
               phone,
               error: e instanceof Error ? e.message : String(e),
             });
-            wa.sendText(
+            sendAgentReply(supabase, wa, {
+              phone,
               jid,
-              "Hoy tuve un problema técnico. Inténtame en un rato y te ayudo."
-            ).catch(() => {
-              /* ignore */
+              body: "Hoy tuve un problema técnico. Inténtame en un rato y te ayudo.",
+              meta: { source: "manos_fallback" },
+            }).catch(() => {
+              /* last resort — already logged inside the helper */
             });
           });
       },
