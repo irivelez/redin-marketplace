@@ -195,15 +195,39 @@ function lowercaseTypes(node: unknown): unknown {
   return out;
 }
 
+// 2026-05-27: Anthropic prompt caching enabled (see Decisions log + handoff).
+// Adding `cache_control: ephemeral` on the LAST tool definition marks the
+// ENTIRE tools block as cacheable. Anthropic caches everything up to and
+// including the marked block, so this one breakpoint covers all ~3.5k tokens
+// of tool schemas. Cache TTL is 5 min — repeated turns within the same
+// conversation hit the cache (90% input-token discount + 0 ITPM impact).
+//
+// Reference: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 function toolsForAnthropic(): Anthropic.Tool[] {
-  return TOOL_DECLARATIONS.map(
-    (d) =>
-      ({
-        name: d.name,
-        description: d.description,
-        input_schema: lowercaseTypes(d.parameters) as Anthropic.Tool["input_schema"],
-      }) satisfies Anthropic.Tool
-  );
+  const tools: Anthropic.Tool[] = TOOL_DECLARATIONS.map((d) => ({
+    name: d.name,
+    description: d.description,
+    input_schema: lowercaseTypes(d.parameters) as Anthropic.Tool["input_schema"],
+  }));
+  if (tools.length > 0) {
+    tools[tools.length - 1]!.cache_control = { type: "ephemeral" };
+  }
+  return tools;
+}
+
+// 2026-05-27: Anthropic prompt caching for the system prompt.
+// Wraps TONO_SYSTEM_PROMPT (~11k tokens) in a single text block with a
+// cache breakpoint. Combined with the tools-block cache above, ~14k of
+// the ~21k per-call input tokens hit the cache after the first call in a
+// 5-min window. Drops effective ITPM cost per call from 21k → ~1-2k.
+function systemForAnthropic(): Anthropic.TextBlockParam[] {
+  return [
+    {
+      type: "text",
+      text: TONO_SYSTEM_PROMPT,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
 }
 
 // Convert ConversationTurn[] (our persisted shape) to Anthropic MessageParam[].
@@ -406,11 +430,12 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     try {
       // Gap A.3: build params conditionally. With thinking enabled,
       // temperature must be omitted (API rejects the combination).
+      const system = systemForAnthropic();
       const params: Anthropic.MessageCreateParamsNonStreaming = THINKING_ENABLED
         ? {
             model: MODEL,
             max_tokens: MAX_TOKENS,
-            system: TONO_SYSTEM_PROMPT,
+            system,
             tools,
             messages,
             thinking: {
@@ -422,7 +447,7 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
             model: MODEL,
             max_tokens: MAX_TOKENS,
             temperature: TEMPERATURE,
-            system: TONO_SYSTEM_PROMPT,
+            system,
             tools,
             messages,
           };
