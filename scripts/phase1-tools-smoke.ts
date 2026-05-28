@@ -71,14 +71,15 @@ function makeDossier(cedula: string): CandidateDossier {
     subcategorias: ["Iluminación (Paneles LED, Balastos)"],
     anos_experiencia: 5,
     ciudad_base: "Cali",
-    certificaciones: {
-      altura: false,
-      altura_avanzado: false,
-      retie: true,
-      andamios: false,
-      soldadura: false,
-      conte: false,
-    },
+     certificaciones: {
+       altura: false,
+       altura_avanzado: false,
+       retie: true,
+       andamios: false,
+       soldadura: false,
+       conte: false,
+       siso: false,
+     },
     herramientas: {
       basicas: true,
       electrica_obra: true,

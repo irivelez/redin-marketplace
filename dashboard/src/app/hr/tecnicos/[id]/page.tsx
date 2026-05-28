@@ -861,6 +861,53 @@ export default async function TecnicoDetailPage({
 // Timeline renderers
 // ---------------------------------------------------------------------------
 
+const CERT_BADGES: ReadonlyArray<readonly [string, string]> = [
+  ["altura", "Trabajo en alturas"],
+  ["altura_avanzado", "Alturas avanzado"],
+  ["retie", "RETIE"],
+  ["andamios", "Andamios"],
+  ["soldadura", "Soldadura"],
+  ["conte", "Conte"],
+  ["siso", "Curso SISO"],
+];
+
+function renderCertBadges(payload: unknown): JSX.Element | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const certs = (payload as Record<string, unknown>).certificaciones;
+  if (!certs || typeof certs !== "object" || Array.isArray(certs)) return null;
+  const c = certs as Record<string, unknown>;
+
+  const active = CERT_BADGES.filter(([key]) => c[key] === true);
+  const otrasRaw = typeof c.otras === "string" ? c.otras.trim() : "";
+  if (active.length === 0 && otrasRaw.length === 0) return null;
+
+  const otras =
+    otrasRaw.length > 30 ? `${otrasRaw.slice(0, 30)}…` : otrasRaw;
+
+  return (
+    <div className="mt-2">
+      <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
+        Certificaciones
+      </div>
+      <div className="mt-1 flex flex-wrap gap-1.5">
+        {active.map(([key, label]) => (
+          <span
+            key={key}
+            className="bg-emerald-100 text-emerald-800 text-xs font-medium px-2 py-0.5 rounded"
+          >
+            {label}
+          </span>
+        ))}
+        {otras && (
+          <span className="bg-slate-100 text-slate-700 text-xs font-medium px-2 py-0.5 rounded">
+            Otras: {otras}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function renderDossier(payload: unknown): JSX.Element {
   const d = payload as {
     id: string;
@@ -890,6 +937,7 @@ function renderDossier(payload: unknown): JSX.Element {
         cédula {d.cedula}
         {d.prompt_sha && <> · prompt_sha {d.prompt_sha.slice(0, 12)}</>}
       </div>
+      {renderCertBadges(d.payload)}
       <details className="mt-1 text-[11px] text-slate-600">
         <summary className="cursor-pointer">payload completo</summary>
         <pre className="mt-1 whitespace-pre-wrap break-all">

@@ -328,14 +328,15 @@ function validatePayload(
     anos_por_categoria: raw.anos_por_categoria,
     ciudad_base: raw.ciudad_base,
     ciudades_cobertura: raw.ciudades_cobertura,
-    certificaciones: raw.certificaciones ?? {
-      altura: false,
-      altura_avanzado: false,
-      retie: false,
-      andamios: false,
-      soldadura: false,
-      conte: false,
-    },
+     certificaciones: raw.certificaciones ?? {
+       altura: false,
+       altura_avanzado: false,
+       retie: false,
+       andamios: false,
+       soldadura: false,
+       conte: false,
+       siso: false,
+     },
     herramientas: raw.herramientas ?? {
       basicas: false,
       electrica_obra: false,

@@ -35,6 +35,7 @@ import {
 } from "@redin/tools";
 import { runTurn, ModelUnavailableError, type ConversationTurn } from "./llm";
 import { SessionStore } from "./session";
+import type { InboundMedia } from "./whatsapp";
 import { wrapData } from "./prompts/data-wrap";
 import {
   createTurnSession,
@@ -60,21 +61,17 @@ export interface HandleMessageInput {
   toolCtx?: ToolContext;
   jid?: string;
   /**
-   * Gap A.5/A.6 follow-up — inbound WhatsApp media (photo or PDF). When
-   * present, agent.ts injects a `[MEDIA_RECEIVED: …]` sentinel into the
-   * user message so the LLM can call upload_documento with the right
-   * tipo (ARL/EPS/cert) based on conversation context. The storage_path
-   * is already in the `documentos` bucket — upload_documento accepts it
-   * directly without re-uploading.
+   * Gap A.5/A.6 follow-up — inbound WhatsApp media (photos or PDFs). When
+   * present, agent.ts injects ONE `[MEDIA_RECEIVED: …]` sentinel per item
+   * into the user message so the LLM can call upload_documento N times
+   * with the right tipo (ARL/EPS/cert) based on conversation context.
+   * Wave 1 batching change (2026-05-27): Baileys delivers each photo as
+   * a separate upsert, so whatsapp.ts now batches consecutive media from
+   * the same sender into ONE onMessage call carrying the full array.
+   * Storage paths are already in the `documentos` bucket — upload_documento
+   * accepts them directly without re-uploading.
    */
-  media?: {
-    storage_path: string;
-    signed_url: string;
-    mime: string;
-    filename: string;
-    caption?: string;
-    kind: "image" | "document";
-  };
+  media?: InboundMedia[];
 }
 
 export interface HandleMessageResult {
@@ -651,14 +648,16 @@ export async function handleMessage(
     contextLines.push(formatIdentityBlock(identityCtx));
   }
 
-  // Gap A.5/A.6 follow-up — when the inbound WA carries media, inject a
-  // sentinel so the LLM can call upload_documento with the right tipo.
-  // The path is already in the `documentos` bucket (whatsapp.ts uploads
-  // to documentos/incoming/<phone>/<uuid>.<ext>), so upload_documento can
-  // record it without re-uploading.
-  if (input.media) {
+  // Gap A.5/A.6 follow-up — when the inbound WA carries media, inject ONE
+  // sentinel per item so the LLM can call upload_documento N times with
+  // the right tipo. Wave 1 (2026-05-27): media is now an array because
+  // whatsapp.ts batches consecutive uploads from the same sender. The paths
+  // are already in the `documentos` bucket (whatsapp.ts uploads to
+  // documentos/incoming/<phone>/<uuid>.<ext>), so upload_documento can
+  // record them without re-uploading.
+  for (const m of input.media ?? []) {
     contextLines.push(
-      `[MEDIA_RECEIVED: kind=${input.media.kind} mime=${input.media.mime} storage_path=${input.media.storage_path} filename=${input.media.filename}]`
+      `[MEDIA_RECEIVED: kind=${m.kind} mime=${m.mime} storage_path=${m.storage_path} filename=${m.filename}]`
     );
   }
   const userMessage = `${contextLines.join("\n")}\n${wrapData(text, "tecnico")}`;

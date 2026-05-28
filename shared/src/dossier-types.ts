@@ -132,21 +132,22 @@ export function computeAgreedWithTono(
 // 2. Specialty taxonomy (verbatim from AppSheet — 2026-05-07)
 // ===========================================================================
 
-// 6 worker-relevant categorías (Personal profesional and Poliza dropped — internal).
+// 7 worker-relevant categorías (Personal profesional and Poliza dropped — internal).
 export const CATEGORIA_VALUES = [
-  "Obra Civil (Locativo)",
+  "Reparaciones Locativas",
   "Eléctrico y Datos",
   "Fachadas y Alturas",
   "Techos y Cubiertas",
   "Hidrosanitario (Plomería)",
   "Logística y Varios",
+  "Climatización",
 ] as const;
 export type Categoria = (typeof CATEGORIA_VALUES)[number];
 
-// 23 subcategorías, grouped by parent. Internal admin subcategorías
+// 26 subcategorías, grouped by parent. Internal admin subcategorías
 // (SISO, Compra de Materiales, Viáticos, Poliza) are excluded.
 export const SUBCATEGORIA_BY_CATEGORIA: Record<Categoria, readonly string[]> = {
-  "Obra Civil (Locativo)": [
+  "Reparaciones Locativas": [
     "Pintura General (Muros/Cielos)",
     "Cerrajería (Chapas, Guardas, Brazos)",
     "Reparación de Pisos y Enchapes",
@@ -180,6 +181,11 @@ export const SUBCATEGORIA_BY_CATEGORIA: Record<Categoria, readonly string[]> = {
     "Alquiler de Equipos (Andamios, Plantas)",
     "Transporte y Acarreos (Mobiliario)",
     "Traslado/Instalación de Equipos",
+  ],
+  "Climatización": [
+    "Instalación de Aire Acondicionado",
+    "Mantenimiento de Aire Acondicionado",
+    "Refrigeración Comercial",
   ],
 };
 
@@ -239,6 +245,7 @@ export type Modalidad = "individual" | "cuadrilla" | "lider";
  *                       "Trabajo en Andamios Certificados" subcategoría.
  *   soldadura         — Safety + competence cert for "Soldadura" subcategoría.
  *   conte             — Consejo profesional electricista (CONTE).
+ *   siso              — Curso/cert Sistema de Gestión de Seguridad y Salud en el Trabajo (SG-SST / SISO).
  *   otras             — Free text — anything else the worker mentions.
  */
 export interface Certificaciones {
@@ -248,6 +255,7 @@ export interface Certificaciones {
   andamios: boolean;
   soldadura: boolean;
   conte: boolean;
+  siso: boolean;
   otras?: string;
 }
 

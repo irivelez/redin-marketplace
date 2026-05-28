@@ -228,18 +228,19 @@ export const TOOL_DECLARATIONS = [
             anos_experiencia: { type: "INTEGER", description: "0-60" },
             ciudad_base: { type: "STRING", description: "Ciudad canónica" },
             ciudades_cobertura: { type: "ARRAY", items: { type: "STRING" } },
-            certificaciones: {
-              type: "OBJECT",
-              properties: {
-                altura: { type: "BOOLEAN" },
-                altura_avanzado: { type: "BOOLEAN" },
-                retie: { type: "BOOLEAN" },
-                andamios: { type: "BOOLEAN" },
-                soldadura: { type: "BOOLEAN" },
-                conte: { type: "BOOLEAN" },
-                otras: { type: "STRING" },
-              },
-            },
+             certificaciones: {
+               type: "OBJECT",
+               properties: {
+                 altura: { type: "BOOLEAN" },
+                 altura_avanzado: { type: "BOOLEAN" },
+                 retie: { type: "BOOLEAN" },
+                 andamios: { type: "BOOLEAN" },
+                 soldadura: { type: "BOOLEAN" },
+                 conte: { type: "BOOLEAN" },
+                 siso: { type: "BOOLEAN" },
+                 otras: { type: "STRING" },
+               },
+             },
             herramientas: {
               type: "OBJECT",
               properties: {

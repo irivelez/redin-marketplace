@@ -17,14 +17,15 @@ const dossier: CandidateDossier = {
   anos_experiencia: 5,
   ciudad_base: "Bogotá",
   ciudades_cobertura: ["Bogotá"],
-  certificaciones: {
-    altura: false,
-    altura_avanzado: false,
-    retie: false,
-    andamios: false,
-    soldadura: false,
-    conte: false,
-  },
+   certificaciones: {
+     altura: false,
+     altura_avanzado: false,
+     retie: false,
+     andamios: false,
+     soldadura: false,
+     conte: false,
+     siso: false,
+   },
   herramientas: {
     basicas: true,
     electrica_obra: true,
