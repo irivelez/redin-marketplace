@@ -33,12 +33,11 @@ function descripcionFrom(data: unknown): string {
   return "";
 }
 
-// Pulls Valor_Estimado from the AppSheet OT row (string in jsonb) and returns
-// it formatted as Colombian Pesos. Maestro de obra needs to know what the job
-// pays before deciding to take it.
+// 2026-05-28: source switched Valor_Estimado → Total_Orden_Calculado per HR.
+// Returns null when TOC is 0 or missing — caller omits the price entirely.
 function valorLabelFrom(data: unknown): string | null {
   if (!data || typeof data !== "object" || Array.isArray(data)) return null;
-  const raw = (data as Record<string, unknown>).Valor_Estimado;
+  const raw = (data as Record<string, unknown>).Total_Orden_Calculado;
   if (typeof raw !== "string") return null;
   const num = Number.parseFloat(raw.replace(/[^\d.-]/g, ""));
   if (!Number.isFinite(num) || num <= 0) return null;
