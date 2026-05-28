@@ -67,13 +67,15 @@ const THINKING_ENABLED = (() => {
 })();
 
 // Budget for the hidden reasoning. Min 1024 (Anthropic API constraint).
-// 2000 is the sweet spot for our screening-style decisions per
-// docs.anthropic.com/en/docs/build-with-claude/extended-thinking.
+// 2026-05-28: dropped default 2000 → 1024 after Julian's live test showed
+// 12.6s avg turn latency. Lower budget shaves ~2-3s per turn while keeping
+// thinking mode's edge-case handling. Eval suite (when wired post-pilot)
+// will be the gate for tuning higher.
 const THINKING_BUDGET = (() => {
   const raw = process.env.TONO_THINKING_BUDGET;
-  if (!raw) return 2000;
+  if (!raw) return 1024;
   const n = parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 1024) return 2000;
+  if (!Number.isFinite(n) || n < 1024) return 1024;
   return n;
 })();
 
