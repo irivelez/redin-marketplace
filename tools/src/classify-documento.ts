@@ -199,6 +199,26 @@ export async function classifyDocumento(
     return err("documento not found", { code: "not_found" });
   }
 
+  // SECURITY (2026-05-28): Ownership check — prevent cross-worker PII leak.
+  // The LLM controls documento_id and the schema has no tecnico_id arg, so
+  // the router can't override it. Without this check, a worker who gets any
+  // other worker's documento_id into the LLM context (via leaked logs, a
+  // future tool return, or prompt injection) could trigger classification of
+  // foreign cédula/EPS/ARL evidence. Habeas Data Ley 1581 violation.
+  //
+  // ctx.session_tecnico_id is the live TurnSession value injected by Toño's
+  // routedDispatch (agent.ts). Absent in smoke-test / dashboard-direct calls
+  // (no WA session backing the call) — ownership check skips for those.
+  if (ctx.session_tecnico_id && ctx.session_tecnico_id !== doc.tecnico_id) {
+    ctx.logger.warn("classify_documento: cross-worker access blocked", {
+      session_id: ctx.session_id,
+      session_tecnico_id: ctx.session_tecnico_id,
+      doc_tecnico_id: doc.tecnico_id,
+      documento_id: input.documento_id,
+    });
+    return err("documento not accessible", { code: "forbidden" });
+  }
+
   const storagePath: string = doc.storage_path;
   const workerClaimedTipo: string = doc.tipo;
   const expectedTipo = input.expected_tipo ?? workerClaimedTipo;
@@ -306,12 +326,13 @@ export async function classifyDocumento(
   });
 
   // 8. Return structured result.
+  // SECURITY (2026-05-28): extracted_fields + classification_jsonb_path
+  // intentionally NOT returned to the LLM. Full payload is in the DB column
+  // documentos.classification_jsonb for HR's DocViewer. See types.ts comment.
   const output: ClassifyDocumentoOutput = {
     classified_type: classifiedType,
     matches_expected: matchesExpected,
     confidence,
-    extracted_fields: extractedFields,
-    classification_jsonb_path: classificationJsonbPath,
   };
 
   return ok(output);

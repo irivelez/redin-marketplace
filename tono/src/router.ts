@@ -76,6 +76,7 @@ const AUTH_GATED_TOOLS = new Set([
   "submit_candidate_dossier",
   "mark_candidate_withdrawn",
   "complete_legacy_profile",
+  "classify_documento",
 ]);
 
 // Tools whose args may carry a tecnico_id that the LLM supplied and that MUST

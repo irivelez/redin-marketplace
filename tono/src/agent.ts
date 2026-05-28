@@ -621,7 +621,14 @@ export async function handleMessage(
     }
     let result: ToolResult<unknown>;
     try {
-      result = await dispatchTool(ctx, name, decision.args);
+      // SECURITY: inject the LIVE TurnSession tecnico_id so per-tool ownership
+      // checks (e.g. classify_documento) see the post-identify_user value, not
+      // the pre-turn snapshot from when agent.ts built toolCtx.
+      const enrichedCtx: ToolContext = {
+        ...ctx,
+        session_tecnico_id: turnSession.tecnico_id,
+      };
+      result = await dispatchTool(enrichedCtx, name, decision.args);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       result = { ok: false, error: msg, code: "tool_threw" };

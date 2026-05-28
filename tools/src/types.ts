@@ -306,8 +306,10 @@ export interface ClassifyDocumentoOutput {
   matches_expected: boolean;
   // Gemini's self-reported confidence [0, 1]
   confidence: number;
-  // Key fields extracted from the document (name, cedula, dates, etc.)
-  extracted_fields?: Record<string, unknown>;
-  // Logical path used for the classification_jsonb column reference (for logging)
-  classification_jsonb_path: string;
+  // SECURITY (2026-05-28): extracted_fields used to live here but contained
+  // PII (cedula number, EPS/ARL provider names, fechas). Returning that to
+  // the LLM was a Habeas Data Ley 1581 exposure — the LLM can echo it into
+  // a worker's WA reply. Full payload is still persisted to
+  // documentos.classification_jsonb for HR's DocViewer; only the chat-facing
+  // contract is narrowed. Discrepancies surfaced through HR dashboard, not Toño.
 }

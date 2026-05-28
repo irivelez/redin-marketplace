@@ -21,6 +21,7 @@ export interface ToolContext {
   escalationSink?: EscalationSink | null;
   now?: () => Date;
   session_id?: string;
+  session_tecnico_id?: string | null;
 }
 
 export function makeDefaultToolContext(overrides?: Partial<ToolContext>): ToolContext {
@@ -31,6 +32,7 @@ export function makeDefaultToolContext(overrides?: Partial<ToolContext>): ToolCo
     escalationSink: overrides?.escalationSink ?? null,
     now: overrides?.now,
     session_id: overrides?.session_id,
+    session_tecnico_id: overrides?.session_tecnico_id,
   };
 }
 
