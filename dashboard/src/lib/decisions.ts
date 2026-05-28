@@ -14,7 +14,7 @@ import { computeResultingState } from "@/lib/decisions-state";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { OFFERABLE_ESTADO } from "@redin/tools/read-pending-ots";
 import { hasCedulaUploaded } from "@redin/tools/missing-docs";
-import { otDescripcion, otValorEstimado } from "@/lib/ot-display";
+import { otDescripcion, otTotalOrdenCalculado } from "@/lib/ot-display";
 
 // ---------------------------------------------------------------------------
 // Session expiry
@@ -132,7 +132,7 @@ async function fireApprovalPush(
         .slice(0, MAX_OT_LINES)
         .map((o) => {
           const desc = _truncateDesc(otDescripcion(o.data) || "(sin descripción)");
-          const valor = otValorEstimado(o.data);
+          const valor = otTotalOrdenCalculado(o.data);
           return {
             row_id: o.row_id,
             descripcion: desc,

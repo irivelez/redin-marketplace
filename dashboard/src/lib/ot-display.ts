@@ -52,8 +52,9 @@ export function tecnicoLabel(args: {
 
 // Parses Valor_Estimado from an ots_mirror.data blob. Returns { num, label }
 // where label is COP-formatted ("$658.192") or null when the field is
-// missing/non-numeric. Used by the proactive approval message and any
-// future "show me available work" surface.
+// missing/non-numeric. Used by HR-internal pages (pipeline, técnicos,
+// shortlist, contratos) — the initial estimate is the right context there.
+// Worker-facing surfaces should use otTotalOrdenCalculado instead.
 export function otValorEstimado(data: unknown): {
   num: number | null;
   label: string | null;
@@ -62,6 +63,30 @@ export function otValorEstimado(data: unknown): {
     return { num: null, label: null };
   }
   const raw = (data as Record<string, unknown>).Valor_Estimado;
+  if (typeof raw !== "string") return { num: null, label: null };
+  const num = Number.parseFloat(raw.replace(/[^\d.-]/g, ""));
+  if (!Number.isFinite(num) || num <= 0) return { num: null, label: null };
+  const label = new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    maximumFractionDigits: 0,
+  }).format(num);
+  return { num, label };
+}
+
+// 2026-05-28: worker-facing valor — reads Total_Orden_Calculado (post-cotización
+// final amount), not Valor_Estimado. Per HR: workers should see the truthful
+// calculated total when known. Returns null when TOC is missing or 0 so the
+// caller can OMIT the price entirely (no "$0", no "por confirmar" — just
+// silence). Used by decisions.ts approval push and read_pending_ots (Toño).
+export function otTotalOrdenCalculado(data: unknown): {
+  num: number | null;
+  label: string | null;
+} {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { num: null, label: null };
+  }
+  const raw = (data as Record<string, unknown>).Total_Orden_Calculado;
   if (typeof raw !== "string") return { num: null, label: null };
   const num = Number.parseFloat(raw.replace(/[^\d.-]/g, ""));
   if (!Number.isFinite(num) || num <= 0) return { num: null, label: null };
