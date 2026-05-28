@@ -25,8 +25,8 @@ import type {
 } from "./types";
 import { err, ok } from "./types";
 
-const MODEL_ID = "gemini-2.5-flash-preview-05-20";
-const TIMEOUT_MS = 5_000;
+const MODEL_ID = process.env["GEMINI_CLASSIFIER_MODEL"]?.trim() || "gemini-2.5-flash";
+const TIMEOUT_MS = 10_000;
 const RETRY_DELAY_MS = 500;
 
 // Canonical tipo values the classifier may return.
@@ -99,7 +99,7 @@ interface GeminiClassifyResult {
 
 async function callGeminiClassifier(
   apiKey: string,
-  fileUrl: string,
+  fileBase64: string,
   mimeType: string
 ): Promise<GeminiClassifyResult> {
   const genAI = new GoogleGenerativeAI(apiKey);
@@ -123,13 +123,13 @@ async function callGeminiClassifier(
     'discrepancies: string[]}. ' +
     "Si NO puedes leer el documento, classified_type='unreadable', confidence=0.";
 
+  // inlineData (base64 bytes) is the supported path for arbitrary external
+  // storage. fileData.fileUri only accepts Files API URIs and YouTube URLs —
+  // raw Supabase signed URLs silently time out at Gemini's fetch step.
   const result = await model.generateContent([
     {
-      inlineData: undefined as never, // force fileData path below
-    },
-    {
-      fileData: {
-        fileUri: fileUrl,
+      inlineData: {
+        data: fileBase64,
         mimeType,
       },
     },
@@ -143,17 +143,17 @@ async function callGeminiClassifier(
   return parsed;
 }
 
-// Wraps the Gemini call with a 5-second hard timeout and one retry on 5xx.
+// Wraps the Gemini call with a 10-second hard timeout and one retry on 5xx.
 async function callWithRetry(
   apiKey: string,
-  fileUrl: string,
+  fileBase64: string,
   mimeType: string
 ): Promise<GeminiClassifyResult> {
   const attempt = async (): Promise<GeminiClassifyResult> => {
     const timeout = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error("classifier_timeout")), TIMEOUT_MS)
     );
-    return Promise.race([callGeminiClassifier(apiKey, fileUrl, mimeType), timeout]);
+    return Promise.race([callGeminiClassifier(apiKey, fileBase64, mimeType), timeout]);
   };
 
   try {
@@ -223,17 +223,22 @@ export async function classifyDocumento(
   const workerClaimedTipo: string = doc.tipo;
   const expectedTipo = input.expected_tipo ?? workerClaimedTipo;
 
-  // 2. Generate a signed URL from Supabase Storage (TTL 300s).
-  const { data: signedData, error: signedErr } = await ctx.supabase.storage
+  // 2. Download the file bytes via service-role Supabase. Avoids the signed-
+  //    URL roundtrip and works with Gemini's inlineData path (which is the
+  //    only path that accepts arbitrary external content — fileData.fileUri
+  //    is reserved for Files API URIs and YouTube).
+  const { data: blob, error: dlErr } = await ctx.supabase.storage
     .from("documentos")
-    .createSignedUrl(storagePath, 300);
+    .download(storagePath);
 
-  if (signedErr || !signedData?.signedUrl) {
+  if (dlErr || !blob) {
     return err(
-      `storage signed URL failed: ${signedErr?.message ?? "no url returned"}`,
+      `storage download failed: ${dlErr?.message ?? "no blob returned"}`,
       { code: "storage_error", retryable: true }
     );
   }
+
+  const fileBase64 = Buffer.from(await blob.arrayBuffer()).toString("base64");
 
   // Infer MIME type from path extension; default to application/pdf.
   const ext = storagePath.split(".").pop()?.toLowerCase() ?? "";
@@ -245,12 +250,23 @@ export async function classifyDocumento(
     webp: "image/webp",
     heic: "image/heic",
   };
-  const mimeType = mimeMap[ext] ?? "application/pdf";
+  // If we don't recognize the extension, log + default to PDF rather than
+  // silently misclassifying. Per Oracle code-review MINOR #5.
+  const mimeType = mimeMap[ext];
+  if (!mimeType) {
+    ctx.logger.warn("classify_documento: unknown extension, defaulting to application/pdf", {
+      documento_id: input.documento_id,
+      ext,
+      storage_path: storagePath,
+    });
+  }
+  const effectiveMime = mimeType ?? "application/pdf";
 
-  // 3. Call Gemini 2.5 Flash multimodal classifier.
+  // 3. Call Gemini Flash multimodal classifier (model env-overridable via
+  //    GEMINI_CLASSIFIER_MODEL, default current stable).
   let geminiResult: GeminiClassifyResult;
   try {
-    geminiResult = await callWithRetry(apiKey, signedData.signedUrl, mimeType);
+    geminiResult = await callWithRetry(apiKey, fileBase64, effectiveMime);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     ctx.logger.warn("classify_documento: Gemini call failed after retry", {
