@@ -47,13 +47,35 @@ const log = createLogger("manos:llm");
 
 // 2026-05-29: Default flipped Haiku 4.5 → Sonnet 4.5 for native vision on
 // the arrival turn (see RunTurnInput.userImages). Env-overridable; setting
-// MANOS_MODEL=claude-haiku-4-5 restores the prior behaviour. Extended thinking
-// stays OFF so temperature=0.3 is legal — DO NOT add a `thinking:` block to
-// messages.create() without first removing the temperature parameter.
+// MANOS_MODEL=claude-haiku-4-5 restores the prior behaviour.
 const MODEL = process.env.MANOS_MODEL?.trim() || "claude-sonnet-4-5";
-const TIMEOUT_MS = 30_000;
+const TIMEOUT_MS = 45_000;
 const MAX_TOOL_ITERATIONS = 6;
-const MAX_TOKENS = 1024;
+
+// 2026-05-29: Extended thinking ON by default (mirrors tono/src/llm.ts).
+// Scope-building is open-ended judgment — deciding what's missing, what to ask
+// next, reconciling ambiguous Spanish + photo evidence — which is exactly where
+// thinking helps. Env off-switch MANOS_THINKING_ENABLED=0 reverts to single-pass.
+const THINKING_ENABLED = (() => {
+  const raw = process.env.MANOS_THINKING_ENABLED;
+  if (raw === undefined || raw === null || raw === "") return true;
+  return !["0", "false", "no", "off"].includes(raw.toLowerCase());
+})();
+
+// Hidden-reasoning budget. Anthropic floor is 1024.
+const THINKING_BUDGET = (() => {
+  const raw = process.env.MANOS_THINKING_BUDGET;
+  if (!raw) return 1024;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1024 ? n : 1024;
+})();
+
+// Anthropic constraint: max_tokens must exceed thinking budget. With thinking
+// on we add 2048 headroom for the visible reply + tool_use blocks.
+const MAX_TOKENS = THINKING_ENABLED ? THINKING_BUDGET + 2048 : 1024;
+
+// Anthropic rejects `temperature` when `thinking` is enabled, so it is ONLY
+// applied on the no-thinking path (see runTurn param build).
 const TEMPERATURE = 0.3;
 
 export const __configForTests = {
@@ -61,6 +83,8 @@ export const __configForTests = {
   TEMPERATURE,
   MAX_TOKENS,
   MAX_TOOL_ITERATIONS,
+  THINKING_ENABLED,
+  THINKING_BUDGET,
 } as const;
 
 export interface RunTurnInput {
@@ -353,19 +377,24 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     const t0 = Date.now();
     let response: Anthropic.Message;
     try {
-      response = await createMessageWithRetry(
-        c,
-        {
-          model: MODEL,
-          max_tokens: MAX_TOKENS,
-          temperature: TEMPERATURE,
-          system: systemForAnthropic(),
-          tools,
-          messages,
-        },
-        input.toolCtx,
-        TIMEOUT_MS
-      );
+      const params: Anthropic.MessageCreateParamsNonStreaming = THINKING_ENABLED
+        ? {
+            model: MODEL,
+            max_tokens: MAX_TOKENS,
+            system: systemForAnthropic(),
+            tools,
+            messages,
+            thinking: { type: "enabled", budget_tokens: THINKING_BUDGET },
+          }
+        : {
+            model: MODEL,
+            max_tokens: MAX_TOKENS,
+            temperature: TEMPERATURE,
+            system: systemForAnthropic(),
+            tools,
+            messages,
+          };
+      response = await createMessageWithRetry(c, params, input.toolCtx, TIMEOUT_MS);
     } catch (e) {
       const latency_ms = Date.now() - t0;
       const error_message = e instanceof Error ? e.message : String(e);
