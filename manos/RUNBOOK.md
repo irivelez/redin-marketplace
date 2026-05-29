@@ -203,7 +203,11 @@ railway up --service manos-mp --detach
 |-----|----------|-------|
 | `SUPABASE_URL` | Yes | Same as all services |
 | `SUPABASE_SECRET_KEY` | Yes | Service-role key |
-| `ANTHROPIC_API_KEY` | Yes | Claude Haiku 4.5 |
+| `ANTHROPIC_API_KEY` | Yes | Claude Sonnet 4.5 by default (override via `MANOS_MODEL`) |
+| `MANOS_MODEL` | No | Anthropic model id. Default `claude-sonnet-4-5`. Set to `claude-haiku-4-5` to revert. |
+| `MANOS_THINKING_ENABLED` | No | Extended thinking. Default ON. Set to `0` / `false` to revert to single-pass. |
+| `MANOS_THINKING_BUDGET` | No | Hidden-reasoning budget (>=1024). Default 1024. |
+| `MANOS_MAX_TOKENS` | No | Override max_tokens. Default `THINKING_BUDGET + 2048` (thinking on) / `2048` (off). |
 | `GROQ_API_KEY` | Yes | Whisper transcription |
 | `MANOS_DATA_DIR` | Yes | Must be `/data` (volume mount) |
 | `TELEGRAM_BOT_TOKEN` | No | Cédula rejection alerts |
@@ -229,8 +233,8 @@ Manos WA number
   manos-mp service
        ↓ runCedulaGate() — pre-LLM, cédula verified against arquitectos_mirror
        ↓ transcribeAudio() — Groq Whisper for voice notes
-       ↓ handleManosMessage() — Claude Haiku 4.5 + 4 tools
-       ↓ tools: list_my_pending_ots, attach_photos, set_alcance_ot, finalize_alcance
+       ↓ handleManosMessage() — Claude Sonnet 4.5 (extended thinking ON) + 5 tools
+       ↓ tools: list_my_pending_ots, attach_photos, set_alcance_ot, finalize_alcance, view_photo
        ↓ ots_extended (Supabase) ← source of truth for alcance state
        ↓ appsheet_alcance_pending=true → sync-mp outbox drains → AppSheet editOT()
 ```

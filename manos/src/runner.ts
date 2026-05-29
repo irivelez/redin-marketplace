@@ -40,7 +40,7 @@ async function main() {
           number_env: process.env.MANOS_WA_NUMBER ?? "(unset)",
         });
       },
-      onMessage: async ({ phone, text, jid, imageUrls }) => {
+      onMessage: async ({ phone, text, jid, imageUrls, imageDescriptions }) => {
         mutex
           .run(phone, async () => {
             const toolCtx = makeDefaultToolContext({
@@ -56,6 +56,7 @@ async function main() {
                 toolCtx,
                 jid,
                 imageUrls,
+                imageDescriptions,
               },
               { supabase, escalationSink }
             );

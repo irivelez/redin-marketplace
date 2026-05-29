@@ -8,6 +8,7 @@ import {
   attachPhotos,
   setAlcanceOt,
   finalizeAlcance,
+  viewPhoto,
 } from "@redin/tools/manos";
 
 // ---------------------------------------------------------------------------
@@ -97,6 +98,25 @@ export const MANOS_TOOL_DECLARATIONS = [
       required: ["ot_row_id"],
     },
   },
+  {
+    name: "view_photo",
+    description:
+      "Vuelve a abrir una foto que el arquitecto ya envió en un turno anterior, para examinarla de nuevo nativamente (la imagen llega como bloque visual en el siguiente turno). Úsalo solo si necesitas verificar un detalle visual específico que no quedó claro en el análisis visual de la conversación.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        ot_row_id: {
+          type: "STRING",
+          description: "El row_id de la OT cuya foto quieres re-examinar.",
+        },
+        n: {
+          type: "INTEGER",
+          description: "Número de la foto a re-examinar (1 = primera foto enviada para esta OT).",
+        },
+      },
+      required: ["ot_row_id", "n"],
+    },
+  },
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +139,8 @@ export async function dispatchManosTools(
       return setAlcanceOt(ctx, args);
     case "finalize_alcance":
       return finalizeAlcance(ctx, args);
+    case "view_photo":
+      return viewPhoto(ctx, args);
     default:
       return {
         ok: false,

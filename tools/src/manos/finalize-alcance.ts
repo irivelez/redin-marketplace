@@ -106,6 +106,11 @@ export async function finalizeAlcance(
       : null) ??
     "Arquitecto";
 
+  // Resolve each stored photo to an embeddable data URI. photo_paths holds
+  // signed URLs which can expire, so we download the bytes via the storage
+  // object path (derived from the URL) rather than trusting the URL itself.
+  const photos = await resolveAlcancePhotos(ctx, photoPaths);
+
   // Generate PDF.
   const pdfBuffer = await generateAlcancePdf({
     otRowId,
@@ -114,7 +119,7 @@ export async function finalizeAlcance(
     especialidad: alcance.especialidad,
     arqNombre,
     alcance,
-    photoPaths,
+    photos,
     generatedAt: new Date().toISOString(),
   });
 
@@ -313,13 +318,66 @@ interface AlcancePdfProps {
   especialidad: string;
   arqNombre: string;
   alcance: AlcanceShape;
-  photoPaths: string[];
+  photos: { dataUri: string }[];
   generatedAt: string;
+}
+
+const ALCANCE_BUCKET = "alcance-photos";
+
+function objectPathFromStored(stored: string): string {
+  const marker = `/${ALCANCE_BUCKET}/`;
+  const idx = stored.indexOf(marker);
+  const raw = idx >= 0 ? stored.slice(idx + marker.length) : stored;
+  const noQuery = raw.split("?")[0] ?? raw;
+  return noQuery.startsWith(`${ALCANCE_BUCKET}/`)
+    ? noQuery.slice(ALCANCE_BUCKET.length + 1)
+    : noQuery;
+}
+
+function mediaTypeFor(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".webp")) return "image/webp";
+  return "image/jpeg";
+}
+
+async function resolveAlcancePhotos(
+  ctx: ToolContext,
+  photoPaths: string[]
+): Promise<{ dataUri: string }[]> {
+  const out: { dataUri: string }[] = [];
+  for (const stored of photoPaths) {
+    const objectPath = objectPathFromStored(stored);
+    if (
+      !objectPath.startsWith("incoming/") ||
+      objectPath.startsWith("/") ||
+      objectPath.split("/").includes("..")
+    ) {
+      ctx.logger.warn("alcance photo path rejected — not under incoming/ or contains traversal segments; skipping in PDF", {
+        object_path: objectPath,
+        stored,
+      });
+      continue;
+    }
+    const { data, error } = await ctx.supabase.storage
+      .from(ALCANCE_BUCKET)
+      .download(objectPath);
+    if (error || !data) {
+      ctx.logger.warn("alcance photo download failed — skipping in PDF", {
+        object_path: objectPath,
+        error: error?.message,
+      });
+      continue;
+    }
+    const buf = Buffer.from(await data.arrayBuffer());
+    out.push({ dataUri: `data:${mediaTypeFor(objectPath)};base64,${buf.toString("base64")}` });
+  }
+  return out;
 }
 
 async function generateAlcancePdf(props: AlcancePdfProps): Promise<Buffer> {
   // Dynamic import to avoid bundling @react-pdf/renderer in non-PDF contexts.
-  const { pdf, Document, Page, Text, View, StyleSheet } = await import(
+  const { pdf, Document, Page, Text, View, Image, StyleSheet } = await import(
     "@react-pdf/renderer"
   );
   const React = await import("react");
@@ -341,6 +399,9 @@ async function generateAlcancePdf(props: AlcancePdfProps): Promise<Buffer> {
       borderTopColor: "#e2e8f0",
       paddingTop: 8,
     },
+    photoBlock: { marginBottom: 12 },
+    photoLabel: { fontSize: 9, color: "#475569", marginBottom: 3 },
+    photo: { maxWidth: 380, maxHeight: 460, objectFit: "contain" },
   });
 
   const fechaLegible = new Date(props.generatedAt).toLocaleDateString("es-CO", {
@@ -423,13 +484,16 @@ async function generateAlcancePdf(props: AlcancePdfProps): Promise<Buffer> {
       React.createElement(Text, { style: styles.h2 }, "RESUMEN"),
       React.createElement(Text, { style: styles.p }, props.alcance.summary),
 
-      ...(props.photoPaths.length > 0
+      ...(props.photos.length > 0
         ? [
-            React.createElement(Text, { style: styles.h2 }, "FOTOS ADJUNTAS"),
-            React.createElement(
-              Text,
-              { style: styles.p },
-              `${props.photoPaths.length} foto(s) almacenada(s) en el sistema.`
+            React.createElement(Text, { style: styles.h2 }, "REGISTRO FOTOGRÁFICO"),
+            ...props.photos.map((photo, i) =>
+              React.createElement(
+                View,
+                { key: `ph${i}`, style: styles.photoBlock, wrap: false },
+                React.createElement(Text, { style: styles.photoLabel }, `Foto ${i + 1}`),
+                React.createElement(Image, { style: styles.photo, src: photo.dataUri })
+              )
             ),
           ]
         : []),

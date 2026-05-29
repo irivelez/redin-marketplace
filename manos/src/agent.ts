@@ -38,6 +38,8 @@ export interface HandleManosMessageInput {
   jid?: string;
   /** Signed URLs of photos uploaded to alcance-photos/incoming this turn. */
   imageUrls?: string[];
+  /** Vision-generated Spanish captions, index-aligned with imageUrls. */
+  imageDescriptions?: string[];
 }
 
 export interface HandleManosMessageResult {
@@ -105,7 +107,7 @@ export async function handleManosMessage(
   await sessions.recordMessage({
     sessionId: session.id,
     role: "user",
-    content: buildUserContent(text, input.imageUrls),
+    content: buildUserContent(text, input.imageUrls, input.imageDescriptions),
   });
 
   if (!gateResult.passed) {
@@ -123,6 +125,28 @@ export async function handleManosMessage(
   // Gate passed (or already open) — resolve arq_row_id for tool injection.
   const arqRowId = sessionMeta.arq_row_id as string | undefined;
   const updatedCtx: ToolContext = { ...toolCtx };
+
+  // Persist the REAL inbound jid onto the session row so the outbound
+  // drainer can deliver link + PDF to LID accounts. On LID-mode accounts
+  // the real remoteJid is "<id>@lid", NOT "<phone>@s.whatsapp.net" —
+  // reconstructing it from row.phone (jidFromPhone) routes to a dead
+  // address and Baileys silently "sends" to nowhere.
+  // We MERGE into existing meta to preserve arq_row_id.
+  if (typeof input.jid === "string" && input.jid.length > 0 && sessionMeta.jid !== input.jid) {
+    const mergedMeta = { ...sessionMeta, jid: input.jid };
+    const { error: metaErr } = await baseCtx.supabase
+      .from("sessions")
+      .update({ meta: mergedMeta as unknown as Json })
+      .eq("id", session.id);
+    if (metaErr) {
+      log.warn("session meta jid persist failed", {
+        session_id: session.id,
+        error: metaErr.message,
+      });
+    } else {
+      sessionMeta.jid = input.jid;
+    }
+  }
 
   // If the gate just verified (gateResult has a reply), send that reply and
   // then CONTINUE to LLM so the architect's very first substantive message
@@ -143,7 +167,7 @@ export async function handleManosMessage(
   const history = await loadHistory(sessions, session.id);
 
   // Build user message with optional image URL appendix.
-  const userMessageForLlm = buildUserContent(text, input.imageUrls);
+  const userMessageForLlm = buildUserContent(text, input.imageUrls, input.imageDescriptions);
 
   let llmReply: string;
   let toolCallsMade: { name: string; args: Record<string, unknown>; result: ToolResult<unknown> }[] = [];
@@ -166,6 +190,7 @@ export async function handleManosMessage(
       userMessage: userMessageForLlm,
       toolCtx: updatedCtx,
       dispatcher: arqAwareDispatcher,
+      userImages: input.imageUrls?.map((url) => ({ url })),
     });
     llmReply = result.reply;
     toolCallsMade = result.toolCallsMade;
@@ -236,16 +261,24 @@ export async function handleManosMessage(
 // ---- Helpers ----
 
 /**
- * Build the user message string for the LLM, appending image URLs as
- * multimodal hints in text form (Claude Haiku 4.5 supports vision via
- * URL-referenced images in the text; we embed them as structured hints
- * rather than full multimodal blocks for simplicity with conversation
- * history serialization).
+ * Build the user message string for the LLM. Each photo contributes two lines:
+ * its storage URL (so the LLM can pass it to attach_photos) and its
+ * vision-generated description (so the scope reflects what the photo shows —
+ * Claude cannot open the URL itself). Descriptions are index-aligned with URLs.
  */
-function buildUserContent(text: string, imageUrls?: string[]): string {
+function buildUserContent(
+  text: string,
+  imageUrls?: string[],
+  imageDescriptions?: string[]
+): string {
   if (!imageUrls || imageUrls.length === 0) return text || "";
   const imageSection = imageUrls
-    .map((url, i) => `[Foto ${i + 1}: ${url}]`)
+    .map((url, i) => {
+      const desc = imageDescriptions?.[i];
+      return desc
+        ? `[Foto ${i + 1}: ${url}]\n  Análisis visual: ${desc}`
+        : `[Foto ${i + 1}: ${url}]`;
+    })
     .join("\n");
   return text ? `${text}\n\n${imageSection}` : imageSection;
 }

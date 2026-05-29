@@ -303,6 +303,58 @@
       "blocked_by": "S10 must be ready to ship in the same release (otherwise the architect notification gap returns). Ship S11 in the same commit as S10 OR immediately after, never alone.",
       "status": "blocked_by_s10",
       "attempts": 0
+    },
+    {
+      "id": "S12",
+      "title": "Duplicate-question bug — secondary dedup on phone+text+recent-window",
+      "prd_section": "§19 (delivery quality)",
+      "category": "bug-tono-agent",
+      "added": "2026-05-28",
+      "context": "Observed in two consecutive live WA tests on 2026-05-28: Juan Pablo (14:48 PT) and Irina Vélez López (15:27 PT). Toño re-emits the same question 9-11s after the first emission with slightly different wording — second message often opens with 'Dale, pero te preguntaba otra cosa' implying the LLM thought its prior turn was misunderstood, even though the user's answer was correct. In Juan's case: DB-confirmed two distinct outbound_messages rows. In Irina's case: same pattern on 'mándame dos fotos de tu cédula' at 15:27:04 + 15:27:15. Code-path analysis (tono/src/whatsapp.ts handleIncoming → enqueue → flushBatch idempotent; tono/src/agent.ts handleMessage single-emission; tono/src/runner.ts sendAgentReply only on success-path; tono/src/llm.ts runTurn returns ONE reply at iteration where toolUseBlocks.length===0) proves the code guarantees ONE outbound per logical inbound. So the only remaining mechanism is WhatsApp/Baileys re-delivering the same user input with a different msg.key.id, which defeats the existing dedup at whatsapp.ts:254 (seenMessageIds set keyed by msg.key.id only).",
+      "acceptance_criteria": [
+        "tono/src/whatsapp.ts handleIncoming gains a secondary dedup: keep a recentTextByPhone Map<phone, {text, at}>; before enqueueing, if last.text === incoming text AND now - last.at < 3000ms, drop with log.warn('dropped likely retransmission (phone+text+3s)')",
+        "Dedup applies ONLY to text messages (not media — photos with same caption may legitimately repeat); window is 3000ms (long enough to absorb network retransmission, short enough that intentional 'sí sí' or repeat-typing isn't blocked)",
+        "Existing seenMessageIds dedup at line 254 kept as primary; new dedup is belt-and-suspenders for the cases where msg.key.id differs",
+        "Add observability: every inbound handleIncoming logs {phone, msgId, text_preview, dedup_decision} so future duplicate diagnostics have evidence",
+        "Smoke test: simulate two enqueue() calls with same phone+text within 1s — second is dropped with log; same phone+text 5s apart — both processed; same phone different text within 1s — both processed",
+        "Live re-test on phone +137877543452841 with intentional short-answer questions ('6', 'sí', 'no') — confirm no duplicate emission within 10s",
+        "npm run typecheck passes"
+      ],
+      "files_expected": [
+        "tono/src/whatsapp.ts (handleIncoming + new recentTextByPhone map)"
+      ],
+      "evidence_pre_fix": [
+        "data/test-results-tono/May28-juanpablo-tono.txt lines describing 14:48:38 + 14:48:47 outbound dup",
+        "data/test-results-tono/May28-irina-tono/_chat.txt lines 21-22 (3:27:04 + 3:27:15 dup of 'mándame dos fotos')",
+        "DB queries against outbound_messages for both phones confirm two distinct rows per duplicate"
+      ],
+      "status": "open",
+      "attempts": 0
+    },
+    {
+      "id": "S13",
+      "title": "Grounding gate facts whitelist — absorb just-registered nombre + domain terms",
+      "prd_section": "§22 (grounding)",
+      "category": "bug-tono-grounding",
+      "added": "2026-05-28",
+      "context": "Live test 2026-05-28 (Juan Pablo) emitted 3 grounding_violation_logged eventos in a 4-minute span flagging spurious 'ungrounded' tokens: (1) 21:47:05 flagged 'Juan' and 'Pablo' as proper nouns not in grounded facts — but these are the user's OWN just-registered name; (2) 21:49:29 flagged 'RETIE', 'SISO', 'Seguridad', 'Salud', 'Trabajo' as ungrounded — these are Colombian construction-industry safety certifications Toño legitimately asks about during screening; (3) 21:50:17 flagged 'ARL', 'EPS' — Colombian payroll/insurance abbreviations Toño legitimately asks about. The grounding gate is currently log-only (TONO_GROUNDING_ENFORCE defaults to false) so no user impact, but the noise hides real hallucinations. The gate is implemented in tono/src/grounding-gate.ts and called from tono/src/agent.ts:811. Two fixes are needed: (a) the GroundedFacts struct passed at agent.ts:803 must include the worker's nombre from session_identity / register_tecnico tool output, and (b) a static whitelist of domain terms (RETIE, SISO, ARL, EPS, COP, IVA, NIT, RUT, plus screening-context terms 'Seguridad', 'Salud', 'Trabajo' when they appear in compound 'Seguridad y Salud en el Trabajo') must be added to grounding-gate.ts so the gate doesn't flag them.",
+      "acceptance_criteria": [
+        "tono/src/grounding-gate.ts gains DOMAIN_TERMS_WHITELIST: Set<string> = {'RETIE', 'SISO', 'ARL', 'EPS', 'COP', 'IVA', 'NIT', 'RUT', 'Seguridad', 'Salud', 'Trabajo', 'Redin'}; checkGrounding() filters these out before reporting violations",
+        "GroundedFacts now includes nombre (string|null) and nombre_parts (string[]) derived from nombre.split(/\\s+/); checkGrounding treats every nombre part as a grounded proper noun",
+        "tono/src/agent.ts at line ~803 builds groundedFacts with nombre from session_identity (preferred) OR most recent register_tecnico tool result OR tecnicos_extended.nombre lookup (fallback)",
+        "Re-test Juan's exact scenario (register as 'Juan Pablo X', then have Toño ask SISO/RETIE/ARL/EPS questions): zero grounding_violation_logged eventos in the 4-minute window. If real hallucinations occur (e.g., LLM invents a placa or address), they STILL fire — only the listed false positives are suppressed",
+        "npm run typecheck passes"
+      ],
+      "files_expected": [
+        "tono/src/grounding-gate.ts (DOMAIN_TERMS_WHITELIST + nombre_parts handling)",
+        "tono/src/agent.ts (GroundedFacts construction at the gate-call site)"
+      ],
+      "evidence_pre_fix": [
+        "data/test-results-tono/May28-juanpablo-tono.txt session 8a6e5342: 3 grounding_violation_logged events at 21:47:05, 21:49:29, 21:50:17 UTC, flagging Juan/Pablo/RETIE/SISO/ARL/EPS/Seguridad/Salud/Trabajo"
+      ],
+      "blocks_v1_1": "Flipping TONO_GROUNDING_ENFORCE=true is blocked on S13 — until false positives are eliminated, enforce mode would silence legitimate Toño replies that contain the worker's own name or normal domain vocabulary",
+      "status": "open",
+      "attempts": 0
     }
   ]
 }

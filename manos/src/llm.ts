@@ -45,13 +45,78 @@ export class ModelUnavailableError extends Error {
 
 const log = createLogger("manos:llm");
 
-// 2026-05-25: Model is env-overridable (mirrors tono/src/llm.ts). Default
-// stays Haiku 4.5; set MANOS_MODEL=claude-sonnet-4-5 in .env.local to swap.
-const MODEL = process.env.MANOS_MODEL?.trim() || "claude-haiku-4-5";
-const TIMEOUT_MS = 30_000;
+// 2026-05-29: Default flipped Haiku 4.5 → Sonnet 4.5 for native vision on
+// the arrival turn (see RunTurnInput.userImages). Env-overridable; setting
+// MANOS_MODEL=claude-haiku-4-5 restores the prior behaviour.
+const MODEL = process.env.MANOS_MODEL?.trim() || "claude-sonnet-4-5";
+const TIMEOUT_MS = 45_000;
 const MAX_TOOL_ITERATIONS = 6;
-const MAX_TOKENS = 1024;
+
+// 2026-05-29: Extended thinking ON by default (mirrors tono/src/llm.ts).
+// Scope-building is open-ended judgment — deciding what's missing, what to ask
+// next, reconciling ambiguous Spanish + photo evidence — which is exactly where
+// thinking helps. Env off-switch MANOS_THINKING_ENABLED=0 reverts to single-pass.
+const THINKING_ENABLED = (() => {
+  const raw = process.env.MANOS_THINKING_ENABLED;
+  if (raw === undefined || raw === null || raw === "") return true;
+  return !["0", "false", "no", "off"].includes(raw.toLowerCase());
+})();
+
+// Hidden-reasoning budget. Anthropic floor is 1024.
+const THINKING_BUDGET = (() => {
+  const raw = process.env.MANOS_THINKING_BUDGET;
+  if (!raw) return 1024;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1024 ? n : 1024;
+})();
+
+// Anthropic constraint: max_tokens must exceed thinking budget. With thinking
+// on we add 2048 headroom for the visible reply + tool_use blocks; non-thinking
+// fallback is 2048 (mirrors tono/src/llm.ts — 1024 truncated mid-JSON during
+// Santiago's incident). Env-overridable via MANOS_MAX_TOKENS.
+const MAX_TOKENS = (() => {
+  const raw = process.env.MANOS_MAX_TOKENS;
+  const baseDefault = THINKING_ENABLED ? THINKING_BUDGET + 2048 : 2048;
+  if (!raw) return baseDefault;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return baseDefault;
+  if (THINKING_ENABLED && n <= THINKING_BUDGET) return THINKING_BUDGET + 1024;
+  return n;
+})();
+
+// Anthropic rejects `temperature` when `thinking` is enabled, so it is ONLY
+// applied on the no-thinking path (see runTurn param build).
 const TEMPERATURE = 0.3;
+
+// Strip any <thinking>...</thinking> or <reasoning>...</reasoning> blocks
+// that leak into visible assistant text. Belt-and-suspenders: the system
+// prompt forbids these tags, but if the model emits them anyway we MUST
+// not deliver them to WhatsApp (customer-trust destroying — see
+// chat_tono_santiago.txt 2026-05-16). Non-greedy, multi-line, case-
+// insensitive. Also collapses the leading blank lines left behind.
+const VISIBLE_THINKING_RE =
+  /<\s*(thinking|reasoning)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi;
+function stripVisibleThinking(text: string): string {
+  if (!text) return text;
+  const stripped = text.replace(VISIBLE_THINKING_RE, "");
+  // Also handle the rare case of an unclosed <thinking> tag — drop from the
+  // tag to end-of-string rather than ship it.
+  const openOnly = stripped.replace(
+    /<\s*(thinking|reasoning)\b[^>]*>[\s\S]*$/i,
+    ""
+  );
+  // Collapse 3+ blank lines (left behind by the strip) into 2.
+  return openOnly.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+export const __configForTests = {
+  MODEL,
+  TEMPERATURE,
+  MAX_TOKENS,
+  MAX_TOOL_ITERATIONS,
+  THINKING_ENABLED,
+  THINKING_BUDGET,
+} as const;
 
 export interface RunTurnInput {
   // Ordered oldest-first. Each turn is a user/assistant/tool_call/tool_response
@@ -66,6 +131,11 @@ export interface RunTurnInput {
     name: string,
     args: Record<string, unknown>
   ) => Promise<ToolResult<unknown>>;
+  // Hybrid-vision arrival turn: when set, each {url} becomes a native
+  // Anthropic image content block attached to the CURRENT user message only.
+  // History user turns stay plain strings — Spanish captions persisted via
+  // buildUserContent in agent.ts keep cross-turn memory; this carries pixels.
+  userImages?: { url: string }[];
 }
 
 export type ConversationTurn =
@@ -145,9 +215,16 @@ function systemForAnthropic(): Anthropic.TextBlockParam[] {
 // Pair tool_call <-> tool_response by index within consecutive history entries;
 // assign synthetic toolu_h<i>_<j> IDs that only need to be consistent within
 // this single API call.
-function toAnthropicMessages(
+//
+// When `currentUserImages` is non-empty the FINAL user message becomes a
+// content-array with one text block + one image block per URL. History user
+// messages are always plain strings — by design, since the persisted Spanish
+// captions (woven in via buildUserContent in agent.ts) are what carries cross-
+// turn visual memory. See RunTurnInput.userImages.
+export function toAnthropicMessages(
   history: ConversationTurn[],
-  currentUserMessage: string
+  currentUserMessage: string,
+  currentUserImages?: { url: string }[]
 ): Anthropic.MessageParam[] {
   const out: Anthropic.MessageParam[] = [];
   let pendingCallIds: string[] | null = null;
@@ -236,7 +313,20 @@ function toAnthropicMessages(
     }
   }
   flushDanglingToolUse();
-  out.push({ role: "user", content: currentUserMessage });
+  if (currentUserImages && currentUserImages.length > 0) {
+    const blocks: Anthropic.ContentBlockParam[] = [
+      { type: "text", text: currentUserMessage },
+      ...currentUserImages.map(
+        (img): Anthropic.ImageBlockParam => ({
+          type: "image",
+          source: { type: "url", url: img.url },
+        })
+      ),
+    ];
+    out.push({ role: "user", content: blocks });
+  } else {
+    out.push({ role: "user", content: currentUserMessage });
+  }
   return out;
 }
 
@@ -307,7 +397,7 @@ async function createMessageWithRetry(
 
 export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
   const c = getClient();
-  const messages = toAnthropicMessages(input.history, input.userMessage);
+  const messages = toAnthropicMessages(input.history, input.userMessage, input.userImages);
   const tools = toolsForAnthropic();
 
   const toolCallsMade: RunTurnResult["toolCallsMade"] = [];
@@ -318,19 +408,24 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     const t0 = Date.now();
     let response: Anthropic.Message;
     try {
-      response = await createMessageWithRetry(
-        c,
-        {
-          model: MODEL,
-          max_tokens: MAX_TOKENS,
-          temperature: TEMPERATURE,
-          system: systemForAnthropic(),
-          tools,
-          messages,
-        },
-        input.toolCtx,
-        TIMEOUT_MS
-      );
+      const params: Anthropic.MessageCreateParamsNonStreaming = THINKING_ENABLED
+        ? {
+            model: MODEL,
+            max_tokens: MAX_TOKENS,
+            system: systemForAnthropic(),
+            tools,
+            messages,
+            thinking: { type: "enabled", budget_tokens: THINKING_BUDGET },
+          }
+        : {
+            model: MODEL,
+            max_tokens: MAX_TOKENS,
+            temperature: TEMPERATURE,
+            system: systemForAnthropic(),
+            tools,
+            messages,
+          };
+      response = await createMessageWithRetry(c, params, input.toolCtx, TIMEOUT_MS);
     } catch (e) {
       const latency_ms = Date.now() - t0;
       const error_message = e instanceof Error ? e.message : String(e);
@@ -360,10 +455,11 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       args_keys: Object.keys((b.input ?? {}) as Record<string, unknown>),
     }));
 
-    const responseText = textBlocks
+    const rawResponseText = textBlocks
       .map((b) => b.text)
       .join("\n")
       .trim();
+    const responseText = stripVisibleThinking(rawResponseText);
 
     const grounded = toolCallsMeta.length === 0 || responseText.length <= 400;
 
@@ -431,12 +527,35 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
           model: MODEL,
         };
       }
-      toolResultBlocks.push({
-        type: "tool_result",
-        tool_use_id: tu.id,
-        content: JSON.stringify(result),
-        is_error: !result.ok,
-      });
+      // Primary path verified against claude-sonnet-4-5 on 2026-05-29 via
+      // scripts/probe-anthropic-tool-result-image.ts: an `image` block inside
+      // tool_result.content is accepted and the model successfully describes
+      // the pixels in its next turn. Gated strictly to view_photo; every
+      // other tool keeps the historical JSON.stringify path so behaviour for
+      // list_my_pending_ots / attach_photos / set_alcance_ot / finalize_alcance
+      // is byte-for-byte unchanged.
+      if (
+        name === "view_photo" &&
+        result.ok &&
+        (result.data as { image_url?: string } | null)?.image_url
+      ) {
+        const data = result.data as { image_url: string; n: number };
+        toolResultBlocks.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: [
+            { type: "image", source: { type: "url", url: data.image_url } },
+            { type: "text", text: `(foto #${data.n} re-adjuntada)` },
+          ],
+        });
+      } else {
+        toolResultBlocks.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: JSON.stringify(result),
+          is_error: !result.ok,
+        });
+      }
     }
     messages.push({ role: "user", content: toolResultBlocks });
   }
