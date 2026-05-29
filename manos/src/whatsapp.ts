@@ -28,6 +28,7 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { transcribeAudio } from "./transcribe";
+import { describePhoto } from "./describe-photo";
 
 const log = createLogger("manos:wa");
 
@@ -39,6 +40,7 @@ export interface WhatsAppHandlers {
     text: string;
     jid: string;
     imageUrls?: string[];
+    imageDescriptions?: string[];
   }) => Promise<void>;
   onReady?: () => void | Promise<void>;
 }
@@ -221,7 +223,8 @@ export class WhatsAppClient {
 
     // ---- Image message: download + upload to Storage ----
     if (msgContent.imageMessage) {
-      const imageUrls = await this.handleImageMessage(msg, phone);
+      const { urls: imageUrls, descriptions: imageDescriptions } =
+        await this.handleImageMessage(msg, phone);
       const caption =
         msgContent.imageMessage.caption?.trim() ?? "";
       // If the upload pipeline returned no URLs the architect's photo never
@@ -233,7 +236,7 @@ export class WhatsAppClient {
         imageUrls.length === 0
           ? `[PHOTO_UPLOAD_FAILED] ${captionText}`.trim()
           : captionText;
-      await this.opts.handlers.onMessage({ phone, text, jid, imageUrls });
+      await this.opts.handlers.onMessage({ phone, text, jid, imageUrls, imageDescriptions });
       return;
     }
 
@@ -262,9 +265,10 @@ export class WhatsAppClient {
   private async handleImageMessage(
     msg: WAMessage,
     phone: string
-  ): Promise<string[]> {
+  ): Promise<{ urls: string[]; descriptions: string[] }> {
+    const empty = { urls: [] as string[], descriptions: [] as string[] };
     try {
-      if (!this.sock) return [];
+      if (!this.sock) return empty;
       const buffer = await downloadMediaMessage(msg, "buffer", {}, {
         logger: pino({ level: "silent" }) as unknown as pino.Logger,
         reuploadRequest: this.sock.updateMediaMessage,
@@ -282,7 +286,7 @@ export class WhatsAppClient {
 
       if (error) {
         log.error("image upload failed", { phone, error: error.message });
-        return [];
+        return empty;
       }
 
       // Get a signed URL valid for 24h (Manos turns happen in real-time).
@@ -292,17 +296,22 @@ export class WhatsAppClient {
 
       if (!signedData?.signedUrl) {
         log.warn("could not get signed URL for image", { phone, storagePath });
-        return [];
+        return empty;
       }
 
       log.info("image uploaded", { phone, storagePath });
-      return [signedData.signedUrl];
+
+      const caption = await describePhoto(buffer, "image/jpeg");
+      return {
+        urls: [signedData.signedUrl],
+        descriptions: caption ? [caption] : [],
+      };
     } catch (e) {
       log.error("handleImageMessage threw", {
         phone,
         error: e instanceof Error ? e.message : String(e),
       });
-      return [];
+      return empty;
     }
   }
 

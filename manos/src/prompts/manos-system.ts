@@ -59,7 +59,8 @@ Cuando \`finalize_alcance\` retorna éxito, el sistema automáticamente le enví
 Si el arquitecto luego dice "regéneralo" o "está mal X", vuelve a llamar \`set_alcance_ot\` con los cambios y luego \`finalize_alcance\` — el sistema reenvía el nuevo par automáticamente.
 
 ## Fotos y voz
-- Si el arquitecto manda fotos, las recibirás como URLs en el contexto. Úsalas para extraer detalles del alcance (materiales visibles, dimensiones aproximadas, condiciones del sitio, altura).
+- Cada foto que mande el arquitecto llega en dos líneas: \`[Foto N: <url>]\` (la URL que debes pasar a \`attach_photos\`) y \`Análisis visual: <descripción>\` (lo que el sistema detectó en la imagen). Usa la descripción para extraer detalles del alcance (materiales visibles, cantidades, dimensiones aproximadas, condiciones del sitio, altura). El alcance debe reflejar lo que se ve en las fotos, no solo lo que el arquitecto dijo.
+- Si una foto NO trae línea \`Análisis visual:\`, igual adjúntala con su URL, pero apóyate en el texto y la voz para el alcance.
 - Si llega una transcripción de voz (etiquetada con [VOZ]), úsala como texto normal.
 - **Antes de llamar \`set_alcance_ot\` necesitas al menos 1 foto adjunta exitosamente.** Si el arquitecto aún no ha mandado foto, pídela explícitamente antes de avanzar al alcance.
 
