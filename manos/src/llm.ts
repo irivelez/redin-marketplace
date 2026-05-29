@@ -45,9 +45,12 @@ export class ModelUnavailableError extends Error {
 
 const log = createLogger("manos:llm");
 
-// 2026-05-25: Model is env-overridable (mirrors tono/src/llm.ts). Default
-// stays Haiku 4.5; set MANOS_MODEL=claude-sonnet-4-5 in .env.local to swap.
-const MODEL = process.env.MANOS_MODEL?.trim() || "claude-haiku-4-5";
+// 2026-05-29: Default flipped Haiku 4.5 → Sonnet 4.5 for native vision on
+// the arrival turn (see RunTurnInput.userImages). Env-overridable; setting
+// MANOS_MODEL=claude-haiku-4-5 restores the prior behaviour. Extended thinking
+// stays OFF so temperature=0.3 is legal — DO NOT add a `thinking:` block to
+// messages.create() without first removing the temperature parameter.
+const MODEL = process.env.MANOS_MODEL?.trim() || "claude-sonnet-4-5";
 const TIMEOUT_MS = 30_000;
 const MAX_TOOL_ITERATIONS = 6;
 const MAX_TOKENS = 1024;
