@@ -22,7 +22,12 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 const TEST_PHONE = "+19999999900";
-const OT_ROW_ID = "LK4cgHD0DlytRsCBwx8zKZ";
+// OT #859 (Cali) — the architect's only pending-scope OT in state 4. The model
+// naturally picks this one via list_my_pending_ots, so we seed photo_paths
+// here too — that way view_photo (S3) lines up on a real entry. If the
+// AppSheet data shifts and #859 stops being pending, S1 will reveal the new
+// row_id in its reply and this constant must be updated.
+const OT_ROW_ID = "xkaG046PcMKoPczqZNaJFU";
 const ARQ_ROW_ID = "3Ueb6rlyBC9l2LNRF09D2x";
 const PHOTO = path.resolve(
   process.cwd(),
@@ -165,31 +170,35 @@ async function main(): Promise<void> {
     if (!r2.reply || r2.reply.length < 30) fail("S2 reply too short");
     console.log("✅ S2: cross-turn reply produced (manual review needed for caption echo)");
 
-    // ---- S3: view_photo re-examine trigger ----
-    // Nudge the model to verify a specific visual detail. The decision to
-    // actually call view_photo is up to the LLM — we capture whichever tools
-    // it chose. If view_photo fires, we have native re-examine evidence.
-    console.log("\n=== S3: view_photo re-examine nudge ===");
+    console.log("\n=== S3: view_photo re-examine (valid n=1) ===");
     const r3 = await handleManosMessage(
       {
         phone: TEST_PHONE,
         text:
-          "Antes de finalizar quiero confirmar un detalle visual MUY específico de la foto que mandé al inicio: ¿cuántas pantallas digitales se ven exactamente y de qué color es el mostrador? Para estar seguro, re-examina la foto #1 con la herramienta view_photo en vez de fiarte solo del análisis textual.",
+          "Antes de finalizar quiero confirmar un detalle visual MUY específico de la foto #1 que mandé al inicio (la única foto adjuntada a esta OT): ¿cuántas pantallas digitales se ven exactamente y de qué color es el mostrador? Para estar seguro, OBLIGATORIAMENTE re-examina la foto #1 con la herramienta view_photo (n=1) antes de responder — no te fíes solo del análisis textual previo.",
         channel: "manos",
       },
       { supabase }
     );
     console.log("S3 reply:\n", r3.reply);
     console.log("S3 tool_calls:", JSON.stringify(r3.tool_calls));
-    const calledViewPhoto = r3.tool_calls.some((tc) => tc.name === "view_photo");
-    if (calledViewPhoto) {
-      console.log("✅ S3: view_photo called natively — re-examine path exercised");
-    } else {
-      console.log(
-        "⚠️  S3: view_photo NOT called this run — see tool_calls. The mechanism exists" +
-          " (proved by unit + Anthropic probe); whether the model uses it is non-deterministic."
+    const viewPhotoCalls = r3.tool_calls.filter((tc) => tc.name === "view_photo");
+    if (viewPhotoCalls.length === 0) fail("S3 expected at least one view_photo call");
+    const allOk = viewPhotoCalls.every((tc) => tc.result_ok === true);
+    if (!allOk) {
+      fail(
+        `S3 view_photo dispatch must return result_ok===true on a valid n=1; got ${JSON.stringify(
+          viewPhotoCalls
+        )}`
       );
     }
+    const replyLooksVisual = /pantall|mostrador|color|veo|se ve|imagen|foto/i.test(r3.reply);
+    if (!replyLooksVisual) {
+      fail(
+        `S3 reply must reference re-examined visual detail (pantallas/mostrador/color/...): ${r3.reply.slice(0, 200)}`
+      );
+    }
+    console.log("✅ S3: view_photo dispatched ok AND reply references visual detail");
   } finally {
     console.log("\n--- cleanup ---");
     await supabase
