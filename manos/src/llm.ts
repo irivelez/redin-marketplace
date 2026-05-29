@@ -463,12 +463,35 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
           model: MODEL,
         };
       }
-      toolResultBlocks.push({
-        type: "tool_result",
-        tool_use_id: tu.id,
-        content: JSON.stringify(result),
-        is_error: !result.ok,
-      });
+      // Primary path verified against claude-sonnet-4-5 on 2026-05-29 via
+      // scripts/probe-anthropic-tool-result-image.ts: an `image` block inside
+      // tool_result.content is accepted and the model successfully describes
+      // the pixels in its next turn. Gated strictly to view_photo; every
+      // other tool keeps the historical JSON.stringify path so behaviour for
+      // list_my_pending_ots / attach_photos / set_alcance_ot / finalize_alcance
+      // is byte-for-byte unchanged.
+      if (
+        name === "view_photo" &&
+        result.ok &&
+        (result.data as { image_url?: string } | null)?.image_url
+      ) {
+        const data = result.data as { image_url: string; n: number; caption?: string };
+        toolResultBlocks.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: [
+            { type: "image", source: { type: "url", url: data.image_url } },
+            { type: "text", text: data.caption ?? `(foto #${data.n} re-adjuntada)` },
+          ],
+        });
+      } else {
+        toolResultBlocks.push({
+          type: "tool_result",
+          tool_use_id: tu.id,
+          content: JSON.stringify(result),
+          is_error: !result.ok,
+        });
+      }
     }
     messages.push({ role: "user", content: toolResultBlocks });
   }

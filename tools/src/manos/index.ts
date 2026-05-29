@@ -10,3 +10,6 @@ export type { SetAlcanceOtInput, SetAlcanceOtOutput, AlcanceShape } from "./set-
 
 export { finalizeAlcance } from "./finalize-alcance";
 export type { FinalizeAlcanceInput, FinalizeAlcanceOutput } from "./finalize-alcance";
+
+export { viewPhoto } from "./view-photo";
+export type { ViewPhotoInput, ViewPhotoOutput } from "./view-photo";
