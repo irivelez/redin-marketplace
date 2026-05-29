@@ -85,7 +85,7 @@ Do NOT push to GitHub or deploy from this branch yet — left to Irina.
 - ZapSign e-signature integration (v2). Today: draft PDF + offline sign + manual upload.
 - Twilio phone OTP for técnico auth in dashboard. Today: magic-link email for HR only.
 - Cédula OCR / auto doc validation (HR validates manually).
-- Post-OT rating flow (table exists, UX deferred).
+- Post-OT rating flow (table + sender exist, auto-send OFF by default — gated behind `ENABLE_CUSTOMER_RATING=true`; UX deferred). NOTE before re-enabling: the enqueuer's dedup writes the `customer_rating_requested` event AFTER the outbound row, so a failed event insert (or racing cron) can double-send; fix the ordering / add a unique index first.
 - Supabase Auth ↔ tecnicos_extended linking (manual cross-reference via `tecnico_linked_to_auth` event).
 
 ## Source of truth
