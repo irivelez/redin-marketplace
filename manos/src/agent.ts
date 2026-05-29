@@ -126,6 +126,28 @@ export async function handleManosMessage(
   const arqRowId = sessionMeta.arq_row_id as string | undefined;
   const updatedCtx: ToolContext = { ...toolCtx };
 
+  // Persist the REAL inbound jid onto the session row so the outbound
+  // drainer can deliver link + PDF to LID accounts. On LID-mode accounts
+  // the real remoteJid is "<id>@lid", NOT "<phone>@s.whatsapp.net" —
+  // reconstructing it from row.phone (jidFromPhone) routes to a dead
+  // address and Baileys silently "sends" to nowhere.
+  // We MERGE into existing meta to preserve arq_row_id.
+  if (typeof input.jid === "string" && input.jid.length > 0 && sessionMeta.jid !== input.jid) {
+    const mergedMeta = { ...sessionMeta, jid: input.jid };
+    const { error: metaErr } = await baseCtx.supabase
+      .from("sessions")
+      .update({ meta: mergedMeta as unknown as Json })
+      .eq("id", session.id);
+    if (metaErr) {
+      log.warn("session meta jid persist failed", {
+        session_id: session.id,
+        error: metaErr.message,
+      });
+    } else {
+      sessionMeta.jid = input.jid;
+    }
+  }
+
   // If the gate just verified (gateResult has a reply), send that reply and
   // then CONTINUE to LLM so the architect's very first substantive message
   // (if sent after cédula in same turn) gets processed. For simplicity in
