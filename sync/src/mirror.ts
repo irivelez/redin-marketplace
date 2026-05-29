@@ -20,6 +20,14 @@ interface AppSheetContacto extends Record<string, string | undefined> {
 // Belt-and-suspenders against runaway sends if dedup ever breaks.
 const CUSTOMER_RATING_BATCH_CAP = 10;
 
+// Post-OT customer-rating auto-send is OFF by default — the rating UX is
+// deferred (see README "Known TODOs"). The cron was shipped active without a
+// gate, so it kept WhatsApping customers a "¿cómo lo calificas?" prompt. This
+// gate makes the deferral real: only the literal "true" re-enables it.
+export function customerRatingEnabled(): boolean {
+  return process.env.ENABLE_CUSTOMER_RATING?.trim().toLowerCase() === "true";
+}
+
 const log = createLogger("sync");
 
 export interface MirrorResult {
@@ -180,6 +188,8 @@ export class SyncWorker {
   // Worker name comes from the latest tecnico_registered eventos meta — same
   // source identify_user uses. Falls back to "el técnico" if missing.
   private async enqueueCustomerRatingRequests(): Promise<void> {
+    if (!customerRatingEnabled()) return;
+
     const { data: terminados, error } = await this.supabase
       .from("ots_mirror")
       .select("row_id, data")
