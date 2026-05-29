@@ -3,6 +3,13 @@
 // this loop in manos-mp picks them up and sends via Baileys.
 //
 // Single-instance assumption: only one manos-mp replica runs in production.
+//
+// LID delivery: on accounts using WhatsApp's LID identifier the real
+// remoteJid is "<id>@lid", NOT "<phone>@s.whatsapp.net". Reconstructing the
+// jid from the stored phone string (jidFromPhone) produces a dead address on
+// LID accounts → Baileys reports "sent" but the message never arrives.
+// Fix: capture the real inbound jid on the session's meta JSON in agent.ts;
+// the drainer looks it up here via preferredJid().
 
 import { createLogger, jidFromPhone } from "@redin/shared";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -13,6 +20,29 @@ const log = createLogger("manos:outbound");
 const POLL_INTERVAL_MS = 5_000;
 const BATCH_SIZE = 10;
 const MAX_ATTEMPTS = 3;
+
+/**
+ * Pure helper: pick the best jid to send to.
+ *   - If `metaJid` is a string containing "@", trust it verbatim (covers
+ *     both "<id>@lid" for LID accounts and "<phone>@s.whatsapp.net" for
+ *     classic numbers — whatever Baileys observed on the inbound).
+ *   - Otherwise fall back to reconstructing from the stored phone via
+ *     jidFromPhone(); this only works for classic @s.whatsapp.net numbers
+ *     but it's the same behavior we had before the LID fix, so classic
+ *     accounts are unaffected.
+ *
+ * Exported for the unit test in scripts/test-manos-outbound-jid.ts.
+ */
+export function preferredJid(metaJid: unknown, phone: string): string | null {
+  if (typeof metaJid === "string" && metaJid.includes("@")) {
+    return metaJid;
+  }
+  const fallback = jidFromPhone(phone);
+  // jidFromPhone returns "" if phone has no digits — treat that as null
+  // (drainer expects null/missing-"@" to fail the row).
+  if (!fallback || !fallback.includes("@")) return null;
+  return fallback;
+}
 
 export interface OutboundDrainerOpts {
   supabase: SupabaseClient;
@@ -32,7 +62,7 @@ export function startOutboundDrainer(opts: OutboundDrainerOpts): () => void {
       const { data, error } = await supabase
         .from("outbound_messages")
         .select(
-          "id, phone, body, attempts, kind, attachment_path, attachment_filename, attachment_bucket"
+          "id, phone, body, attempts, kind, attachment_path, attachment_filename, attachment_bucket, meta"
         )
         .eq("status", "pending")
         .eq("channel", "manos")
@@ -44,20 +74,32 @@ export function startOutboundDrainer(opts: OutboundDrainerOpts): () => void {
         return;
       }
       for (const row of data ?? []) {
-        // Prefer the JID from arquitectos_mirror if available.
-        const { data: arq } = await supabase
-          .from("arquitectos_mirror")
-          .select("data")
-          .filter("data->>Telefono", "eq", row.phone)
+        // Look up the most-recent manos session for this phone to pull the
+        // real inbound jid captured at agent.ts (LID-aware). Falls back to
+        // the row's own meta.jid (set by sendAgentReply), then to
+        // jidFromPhone(phone) — the legacy reconstruction.
+        const { data: sess } = await supabase
+          .from("sessions")
+          .select("meta")
+          .eq("phone", row.phone)
+          .eq("channel", "manos")
+          .order("last_active", { ascending: false })
           .limit(1)
           .maybeSingle();
-        const jid = jidFromPhone(row.phone);
+        const sessionMetaJid =
+          sess && typeof (sess as { meta?: unknown }).meta === "object" &&
+          (sess as { meta: Record<string, unknown> | null }).meta !== null
+            ? (sess as { meta: Record<string, unknown> }).meta.jid
+            : undefined;
+        const rowMetaJid =
+          row.meta && typeof row.meta === "object" && !Array.isArray(row.meta)
+            ? (row.meta as Record<string, unknown>).jid
+            : undefined;
+        const jid = preferredJid(sessionMetaJid ?? rowMetaJid, row.phone);
         if (!jid || !jid.includes("@")) {
           await markFailed(supabase, row.id, "invalid phone");
           continue;
         }
-        // Suppress unused variable warning — arq is queried for completeness
-        void arq;
         try {
           if (row.kind === "document" && row.attachment_path) {
             const bucket = row.attachment_bucket ?? "alcance-photos";
@@ -121,6 +163,10 @@ async function markRetry(supa: SupabaseClient, id: string, attempts: number, err
 // tono/src/outbound.ts — same enqueue-first invariant prevents replies from
 // being lost when Baileys is mid-reconnect. The channel="manos" tag keeps
 // agent-generated rows on Manos's drainer, separate from Toño's queue.
+//
+// We also stamp `meta.jid = args.jid` so that if the direct send fails and
+// the drainer fallback picks the row up later, it has the real inbound jid
+// even if the session row's meta hasn't been written yet.
 export async function sendAgentReply(
   supabase: SupabaseClient,
   wa: WhatsAppClient,
@@ -134,6 +180,8 @@ export async function sendAgentReply(
   const body = args.body.trim();
   if (!body) return;
 
+  const meta: Record<string, unknown> = { ...(args.meta ?? {}), jid: args.jid };
+
   let outboundId: string | null = null;
   const { data: outRow, error: insErr } = await supabase
     .from("outbound_messages")
@@ -143,7 +191,7 @@ export async function sendAgentReply(
       channel: "manos",
       kind: "text",
       status: "pending",
-      meta: args.meta ?? null,
+      meta,
     })
     .select("id")
     .single();
