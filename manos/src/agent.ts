@@ -168,6 +168,7 @@ export async function handleManosMessage(
       userMessage: userMessageForLlm,
       toolCtx: updatedCtx,
       dispatcher: arqAwareDispatcher,
+      userImages: input.imageUrls?.map((url) => ({ url })),
     });
     llmReply = result.reply;
     toolCallsMade = result.toolCallsMade;
