@@ -63,8 +63,7 @@ Monorepo via npm workspaces:
 ## Quick start (local)
 
 ```bash
-cd /Users/irina/AI-driven-OS/autonomous/redin/marketplace
-
+# from the repo root
 # 1. Install
 npm install
 
@@ -84,15 +83,15 @@ All credentials live in `marketplace/.env.local` (gitignored). Required:
 
 | Var | Purpose |
 | --- | --- |
-| `SUPABASE_URL` | `https://foerbjhnwbxfauajkbld.supabase.co` |
+| `SUPABASE_URL` | `https://<your-project-ref>.supabase.co` |
 | `SUPABASE_PUBLISHABLE_KEY` | `sb_publishable_…` (browser-safe) |
 | `SUPABASE_SECRET_KEY` | `sb_secret_…` (server-only, bypasses RLS) |
 | `SUPABASE_MANAGEMENT_TOKEN` | `sbp_…` (for Management API migrations) |
-| `SUPABASE_PROJECT_REF` | `foerbjhnwbxfauajkbld` |
+| `SUPABASE_PROJECT_REF` | Your Supabase project ref |
 | `DATABASE_URL` | Direct Postgres connection (optional; used only if we add CLI flows) |
 | `ANTHROPIC_API_KEY` | Claude Sonnet 4.5 — powers both Toño and Manos |
-| `WA_NUMBER` | `+573224347117` (Toño's provisioned WhatsApp number — Colombian) |
-| `MANOS_WA_NUMBER` | `+573222392959` (Manos' provisioned WhatsApp number) |
+| `WA_NUMBER` | Toño's provisioned WhatsApp number (E.164, e.g. `+57…`) |
+| `MANOS_WA_NUMBER` | Manos' provisioned WhatsApp number (E.164) |
 | `GROQ_API_KEY` | Voice-note transcription (Manos) |
 | `APPSHEET_APP_ID` | Jose's prod AppSheet |
 | `APPSHEET_ACCESS_KEY` | AppSheet API key |
@@ -133,7 +132,7 @@ Four Railway services (project `redin-marketplace`, env `production`), shared `.
 - **tono** — needs a persistent volume mounted at `/data` (Baileys auth). Set `TONO_DATA_DIR=/data`.
 - **manos** — same volume requirement. `MANOS_DATA_DIR=/data`, `MANOS_MODEL=claude-sonnet-4-5`.
 - **sync** — stateless Node service.
-- **dashboard** — Next.js Node service. Live at `dashboard-mp-production-1ef3.up.railway.app`.
+- **dashboard** — Next.js Node service (the public-facing web app).
 
 ## Roadmap to fully-autonomous (v2)
 
@@ -146,11 +145,11 @@ Four Railway services (project `redin-marketplace`, env `production`), shared `.
 
 ## Source of truth
 
-- PRD: `/Users/irina/AI-driven-OS/autonomous/redin/PRD.md`
-- Story tracker: [`prd.json`](./prd.json)
-- Schema: `migrations/001_init.sql` (applied)
-- Session handoffs: [`.omo/handoffs/`](./.omo/handoffs/) — newest first
+- Story tracker: [`prd.json`](./prd.json) — open stories + acceptance criteria
+- Schema: [`migrations/001_init.sql`](./migrations/001_init.sql) (applied; later migrations in [`migrations/`](./migrations/))
+- Session handoffs: [`.omo/handoffs/`](./.omo/handoffs/) — newest first, the running context log
 - Shipped log: [`CHANGELOG.md`](./CHANGELOG.md)
+- Full PRD (kept alongside the repo, not committed): `redin/PRD.md` in the project root
 
 ---
 
