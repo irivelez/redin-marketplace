@@ -53,6 +53,13 @@ const MAX_TOOL_ITERATIONS = 6;
 const MAX_TOKENS = 1024;
 const TEMPERATURE = 0.3;
 
+export const __configForTests = {
+  MODEL,
+  TEMPERATURE,
+  MAX_TOKENS,
+  MAX_TOOL_ITERATIONS,
+} as const;
+
 export interface RunTurnInput {
   // Ordered oldest-first. Each turn is a user/assistant/tool_call/tool_response
   // entry. We translate to Anthropic MessageParam[] at the boundary.
@@ -66,6 +73,11 @@ export interface RunTurnInput {
     name: string,
     args: Record<string, unknown>
   ) => Promise<ToolResult<unknown>>;
+  // Hybrid-vision arrival turn: when set, each {url} becomes a native
+  // Anthropic image content block attached to the CURRENT user message only.
+  // History user turns stay plain strings — Spanish captions persisted via
+  // buildUserContent in agent.ts keep cross-turn memory; this carries pixels.
+  userImages?: { url: string }[];
 }
 
 export type ConversationTurn =
@@ -145,9 +157,16 @@ function systemForAnthropic(): Anthropic.TextBlockParam[] {
 // Pair tool_call <-> tool_response by index within consecutive history entries;
 // assign synthetic toolu_h<i>_<j> IDs that only need to be consistent within
 // this single API call.
-function toAnthropicMessages(
+//
+// When `currentUserImages` is non-empty the FINAL user message becomes a
+// content-array with one text block + one image block per URL. History user
+// messages are always plain strings — by design, since the persisted Spanish
+// captions (woven in via buildUserContent in agent.ts) are what carries cross-
+// turn visual memory. See RunTurnInput.userImages.
+export function toAnthropicMessages(
   history: ConversationTurn[],
-  currentUserMessage: string
+  currentUserMessage: string,
+  currentUserImages?: { url: string }[]
 ): Anthropic.MessageParam[] {
   const out: Anthropic.MessageParam[] = [];
   let pendingCallIds: string[] | null = null;
@@ -236,7 +255,20 @@ function toAnthropicMessages(
     }
   }
   flushDanglingToolUse();
-  out.push({ role: "user", content: currentUserMessage });
+  if (currentUserImages && currentUserImages.length > 0) {
+    const blocks: Anthropic.ContentBlockParam[] = [
+      { type: "text", text: currentUserMessage },
+      ...currentUserImages.map(
+        (img): Anthropic.ImageBlockParam => ({
+          type: "image",
+          source: { type: "url", url: img.url },
+        })
+      ),
+    ];
+    out.push({ role: "user", content: blocks });
+  } else {
+    out.push({ role: "user", content: currentUserMessage });
+  }
   return out;
 }
 
@@ -307,7 +339,7 @@ async function createMessageWithRetry(
 
 export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
   const c = getClient();
-  const messages = toAnthropicMessages(input.history, input.userMessage);
+  const messages = toAnthropicMessages(input.history, input.userMessage, input.userImages);
   const tools = toolsForAnthropic();
 
   const toolCallsMade: RunTurnResult["toolCallsMade"] = [];
