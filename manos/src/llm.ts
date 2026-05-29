@@ -71,12 +71,43 @@ const THINKING_BUDGET = (() => {
 })();
 
 // Anthropic constraint: max_tokens must exceed thinking budget. With thinking
-// on we add 2048 headroom for the visible reply + tool_use blocks.
-const MAX_TOKENS = THINKING_ENABLED ? THINKING_BUDGET + 2048 : 1024;
+// on we add 2048 headroom for the visible reply + tool_use blocks; non-thinking
+// fallback is 2048 (mirrors tono/src/llm.ts — 1024 truncated mid-JSON during
+// Santiago's incident). Env-overridable via MANOS_MAX_TOKENS.
+const MAX_TOKENS = (() => {
+  const raw = process.env.MANOS_MAX_TOKENS;
+  const baseDefault = THINKING_ENABLED ? THINKING_BUDGET + 2048 : 2048;
+  if (!raw) return baseDefault;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return baseDefault;
+  if (THINKING_ENABLED && n <= THINKING_BUDGET) return THINKING_BUDGET + 1024;
+  return n;
+})();
 
 // Anthropic rejects `temperature` when `thinking` is enabled, so it is ONLY
 // applied on the no-thinking path (see runTurn param build).
 const TEMPERATURE = 0.3;
+
+// Strip any <thinking>...</thinking> or <reasoning>...</reasoning> blocks
+// that leak into visible assistant text. Belt-and-suspenders: the system
+// prompt forbids these tags, but if the model emits them anyway we MUST
+// not deliver them to WhatsApp (customer-trust destroying — see
+// chat_tono_santiago.txt 2026-05-16). Non-greedy, multi-line, case-
+// insensitive. Also collapses the leading blank lines left behind.
+const VISIBLE_THINKING_RE =
+  /<\s*(thinking|reasoning)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi;
+function stripVisibleThinking(text: string): string {
+  if (!text) return text;
+  const stripped = text.replace(VISIBLE_THINKING_RE, "");
+  // Also handle the rare case of an unclosed <thinking> tag — drop from the
+  // tag to end-of-string rather than ship it.
+  const openOnly = stripped.replace(
+    /<\s*(thinking|reasoning)\b[^>]*>[\s\S]*$/i,
+    ""
+  );
+  // Collapse 3+ blank lines (left behind by the strip) into 2.
+  return openOnly.replace(/\n{3,}/g, "\n\n").trim();
+}
 
 export const __configForTests = {
   MODEL,
@@ -424,10 +455,11 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       args_keys: Object.keys((b.input ?? {}) as Record<string, unknown>),
     }));
 
-    const responseText = textBlocks
+    const rawResponseText = textBlocks
       .map((b) => b.text)
       .join("\n")
       .trim();
+    const responseText = stripVisibleThinking(rawResponseText);
 
     const grounded = toolCallsMeta.length === 0 || responseText.length <= 400;
 
@@ -507,13 +539,13 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
         result.ok &&
         (result.data as { image_url?: string } | null)?.image_url
       ) {
-        const data = result.data as { image_url: string; n: number; caption?: string };
+        const data = result.data as { image_url: string; n: number };
         toolResultBlocks.push({
           type: "tool_result",
           tool_use_id: tu.id,
           content: [
             { type: "image", source: { type: "url", url: data.image_url } },
-            { type: "text", text: data.caption ?? `(foto #${data.n} re-adjuntada)` },
+            { type: "text", text: `(foto #${data.n} re-adjuntada)` },
           ],
         });
       } else {
