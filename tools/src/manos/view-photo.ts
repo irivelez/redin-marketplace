@@ -26,7 +26,6 @@ export interface ViewPhotoInput {
 export interface ViewPhotoOutput {
   image_url: string;
   n: number;
-  caption?: string;
 }
 
 const BUCKET = "alcance-photos";
@@ -108,6 +107,16 @@ export async function viewPhoto(
   }
 
   const objectPath = toObjectPath(rawEntry);
+  if (
+    !objectPath.startsWith("incoming/") ||
+    objectPath.startsWith("/") ||
+    objectPath.split("/").includes("..")
+  ) {
+    return err(
+      "stored photo path is not under incoming/ or contains traversal segments",
+      { code: "invalid_photo_path" }
+    );
+  }
   const { data: signed, error: signErr } = await ctx.supabase.storage
     .from(BUCKET)
     .createSignedUrl(objectPath, SIGNED_URL_TTL_SECONDS);

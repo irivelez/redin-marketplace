@@ -348,6 +348,17 @@ async function resolveAlcancePhotos(
   const out: { dataUri: string }[] = [];
   for (const stored of photoPaths) {
     const objectPath = objectPathFromStored(stored);
+    if (
+      !objectPath.startsWith("incoming/") ||
+      objectPath.startsWith("/") ||
+      objectPath.split("/").includes("..")
+    ) {
+      ctx.logger.warn("alcance photo path rejected — not under incoming/ or contains traversal segments; skipping in PDF", {
+        object_path: objectPath,
+        stored,
+      });
+      continue;
+    }
     const { data, error } = await ctx.supabase.storage
       .from(ALCANCE_BUCKET)
       .download(objectPath);

@@ -206,7 +206,272 @@ async function main(): Promise<void> {
     console.log("✅ Case 4: ownership rejection");
   }
 
-  console.log("\n✅ ALL view_photo ASSERTIONS PASSED");
+  // --- Case 5: view-photo path-validation — stored '../secret.jpg' rejected ---
+  {
+    const { ctx } = makeStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      photoPaths: ["incoming/../secret.jpg"],
+    });
+    const res = await viewPhoto!(ctx, { arq_row_id: OWNER, ot_row_id: OT, n: 1 });
+    assert.equal(res.ok, false, "stored '..' path must be rejected");
+    assert.equal(
+      res.code,
+      "invalid_photo_path",
+      `expected invalid_photo_path (got '${res.code}')`
+    );
+    console.log("✅ Case 5: view_photo rejects stored '..' traversal");
+  }
+
+  // --- Case 6: view-photo path-validation — bare 'secret/key.jpg' rejected (no incoming/ prefix) ---
+  {
+    const { ctx } = makeStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      photoPaths: ["secret/key.jpg"],
+    });
+    const res = await viewPhoto!(ctx, { arq_row_id: OWNER, ot_row_id: OT, n: 1 });
+    assert.equal(res.ok, false, "stored 'secret/key.jpg' must be rejected");
+    assert.equal(
+      res.code,
+      "invalid_photo_path",
+      `expected invalid_photo_path (got '${res.code}')`
+    );
+    console.log("✅ Case 6: view_photo rejects stored path without incoming/ prefix");
+  }
+
+  await runAttachPhotosTests();
+
+  console.log("\n✅ ALL view_photo + attach_photos ASSERTIONS PASSED");
+}
+
+// ---------------------------------------------------------------------------
+// attach_photos — input-gate validation (security fix).
+// LLM-supplied photo_urls must be either an https Supabase signed URL for the
+// alcance-photos bucket OR a bare incoming/<phone>/<uuid>.<ext> object key.
+// Anything else (traversal, arbitrary-bucket keys) → invalid_photo_url.
+// ---------------------------------------------------------------------------
+function makeAttachStub(opts: {
+  otRowId: string;
+  otOwnerArqRowId: string;
+  estado: string;
+  sessionPhone?: string;
+  sessionId?: string;
+}): { ctx: ToolContext; upserts: { table: string; row: Record<string, unknown> }[] } {
+  const upserts: { table: string; row: Record<string, unknown> }[] = [];
+
+  const makeQuery = (table: string): { select: (cols?: string) => unknown } => {
+    const state: { eqKey?: string; eqVal?: string } = {};
+    const chain: Record<string, unknown> = {
+      select(_cols?: string) {
+        return chain;
+      },
+      eq(key: string, val: string) {
+        state.eqKey = key;
+        state.eqVal = val;
+        return chain;
+      },
+      async maybeSingle() {
+        if (table === "ots_mirror" && state.eqKey === "row_id") {
+          if (state.eqVal !== opts.otRowId) return { data: null, error: null };
+          return {
+            data: {
+              row_id: opts.otRowId,
+              estado: opts.estado,
+              data: { ID_Arquitecto: opts.otOwnerArqRowId },
+            },
+            error: null,
+          };
+        }
+        if (table === "ots_extended" && state.eqKey === "ot_row_id") {
+          return { data: { photo_paths: [] }, error: null };
+        }
+        if (table === "sessions" && state.eqKey === "id") {
+          if (state.eqVal !== opts.sessionId) return { data: null, error: null };
+          return { data: { phone: opts.sessionPhone ?? null }, error: null };
+        }
+        return { data: null, error: null };
+      },
+    };
+    return chain as { select: (cols?: string) => unknown };
+  };
+
+  const supabase = {
+    from(table: string): unknown {
+      if (table === "eventos") {
+        return { insert: async () => ({ error: null }) };
+      }
+      if (table === "ots_extended") {
+        return {
+          ...makeQuery(table),
+          upsert: async (row: Record<string, unknown>) => {
+            upserts.push({ table, row });
+            return { error: null };
+          },
+        };
+      }
+      return makeQuery(table);
+    },
+  };
+
+  const ctx: ToolContext = {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    supabase: supabase as any,
+    logger: createLogger("test-attach-photos"),
+    defaultActor: "system",
+    session_id: opts.sessionId,
+  };
+  return { ctx, upserts };
+}
+
+async function runAttachPhotosTests(): Promise<void> {
+  const toolsMod = await import("@redin/tools/manos");
+  const attachPhotos = (toolsMod as unknown as {
+    attachPhotos?: (
+      ctx: ToolContext,
+      args: Record<string, unknown>
+    ) => Promise<{ ok: boolean; data?: unknown; code?: string; error?: string }>;
+  }).attachPhotos;
+  assert.ok(
+    typeof attachPhotos === "function",
+    "@redin/tools/manos must export `attachPhotos`"
+  );
+
+  const OWNER = "arq-owner-1";
+  const OT = "ot-row-1";
+  const PHONE = "+573200000001";
+  const SESSION = "session-uuid-test";
+  const UUID_OK = "11111111-2222-3333-4444-555555555555";
+  const VALID_KEY = `incoming/${PHONE}/${UUID_OK}.jpg`;
+  const VALID_URL = `https://foerbjhnwbxfauajkbld.supabase.co/storage/v1/object/sign/alcance-photos/${VALID_KEY}?token=abc`;
+
+  // --- Case 7: valid bare key incoming/<phone>/<uuid>.jpg → ok ---
+  {
+    const { ctx, upserts } = makeAttachStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      sessionPhone: PHONE,
+      sessionId: SESSION,
+    });
+    const res = await attachPhotos!(ctx, {
+      arq_row_id: OWNER,
+      ot_row_id: OT,
+      photo_urls: [VALID_KEY],
+    });
+    assert.equal(res.ok, true, `valid bare key must be accepted (got ${JSON.stringify(res)})`);
+    assert.ok(upserts.length === 1, "upsert must fire on accepted entry");
+    console.log("✅ Case 7: attach_photos accepts incoming/<phone>/<uuid>.jpg");
+  }
+
+  // --- Case 7b: valid signed URL also accepted ---
+  {
+    const { ctx, upserts } = makeAttachStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      sessionPhone: PHONE,
+      sessionId: SESSION,
+    });
+    const res = await attachPhotos!(ctx, {
+      arq_row_id: OWNER,
+      ot_row_id: OT,
+      photo_urls: [VALID_URL],
+    });
+    assert.equal(res.ok, true, `signed URL must be accepted (got ${JSON.stringify(res)})`);
+    assert.ok(upserts.length === 1);
+    console.log("✅ Case 7b: attach_photos accepts legitimate signed URL");
+  }
+
+  // --- Case 8: 'incoming/../secret.jpg' rejected ---
+  {
+    const { ctx, upserts } = makeAttachStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      sessionPhone: PHONE,
+      sessionId: SESSION,
+    });
+    const res = await attachPhotos!(ctx, {
+      arq_row_id: OWNER,
+      ot_row_id: OT,
+      photo_urls: ["incoming/../secret.jpg"],
+    });
+    assert.equal(res.ok, false, "'..' traversal must be rejected");
+    assert.equal(
+      res.code,
+      "invalid_photo_url",
+      `expected invalid_photo_url (got '${res.code}')`
+    );
+    assert.equal(upserts.length, 0, "no upsert when entry rejected");
+    console.log("✅ Case 8: attach_photos rejects 'incoming/../secret.jpg'");
+  }
+
+  // --- Case 9: bare 'secret/key.jpg' (no incoming/ prefix) rejected ---
+  {
+    const { ctx, upserts } = makeAttachStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      sessionPhone: PHONE,
+      sessionId: SESSION,
+    });
+    const res = await attachPhotos!(ctx, {
+      arq_row_id: OWNER,
+      ot_row_id: OT,
+      photo_urls: ["secret/key.jpg"],
+    });
+    assert.equal(res.ok, false, "no-incoming-prefix must be rejected");
+    assert.equal(
+      res.code,
+      "invalid_photo_url",
+      `expected invalid_photo_url (got '${res.code}')`
+    );
+    assert.equal(upserts.length, 0);
+    console.log("✅ Case 9: attach_photos rejects 'secret/key.jpg' (no incoming/ prefix)");
+  }
+
+  // --- Case 10: without session phone, path SHAPE still enforced (wrong phone in key still ok if SHAPE matches) ---
+  {
+    const { ctx } = makeAttachStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      sessionId: undefined,
+    });
+    const res = await attachPhotos!(ctx, {
+      arq_row_id: OWNER,
+      ot_row_id: OT,
+      photo_urls: ["incoming/+999/" + UUID_OK + ".jpg"],
+    });
+    assert.equal(
+      res.ok,
+      true,
+      `without session phone, valid shape must be accepted (got ${JSON.stringify(res)})`
+    );
+    console.log("✅ Case 10: shape-only check applied when session phone unavailable");
+  }
+
+  // --- Case 11: with session phone, wrong-phone entry rejected ---
+  {
+    const { ctx } = makeAttachStub({
+      otRowId: OT,
+      otOwnerArqRowId: OWNER,
+      estado: "4. Coordinar – Listo para ejecutar",
+      sessionPhone: PHONE,
+      sessionId: SESSION,
+    });
+    const res = await attachPhotos!(ctx, {
+      arq_row_id: OWNER,
+      ot_row_id: OT,
+      photo_urls: ["incoming/+999/" + UUID_OK + ".jpg"],
+    });
+    assert.equal(res.ok, false, "wrong phone in key must be rejected");
+    assert.equal(res.code, "invalid_photo_url");
+    console.log("✅ Case 11: session-phone-bound check rejects mismatched key");
+  }
 }
 
 main().catch((e) => {

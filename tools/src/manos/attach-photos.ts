@@ -2,6 +2,20 @@
 //
 // Identity gate: arq_row_id injected from session.meta via agent dispatcher.
 // Ownership check: validates that ots_mirror.data->>'ID_Arquitecto' = arq_row_id.
+//
+// Security: `photo_urls` originate from the LLM and end up persisted verbatim
+// into ots_extended.photo_paths, then later passed back to Supabase Storage by
+// view_photo / finalize_alcance (and by the alcance PDF generator) to fetch
+// bytes from the alcance-photos bucket. If we trusted whatever the model said,
+// a prompt injection could persist a path that, once normalized by toObjectPath
+// / objectPathFromStored, points outside `incoming/<phone>/` — exfiltrating any
+// object in the bucket the service role can read. Fail-closed at the input
+// gate: the only shapes we accept are (a) the legitimate signed URL the system
+// itself minted in manos/src/whatsapp.ts handleImageMessage, or (b) a bare
+// object key under `incoming/<phone>/<uuid>.<ext>`. Phone is resolved from the
+// session that produced this turn (ctx.session_id → sessions.phone) when
+// available; if not, we still enforce the same path SHAPE so traversal /
+// arbitrary-bucket reads stay blocked.
 
 import type { ToolContext } from "../context";
 import type { ToolResult } from "../types";
@@ -11,6 +25,56 @@ export interface AttachPhotosInput {
   arq_row_id: string;
   ot_row_id: string;
   photo_urls: string[];
+}
+
+// Object-key shape we mint in manos/src/whatsapp.ts:
+//   incoming/<phone>/<uuid>.jpg
+// UUID is generated via crypto.randomUUID() (RFC 4122 — 8-4-4-4-12 hex digits,
+// 36 chars total including hyphens). Extensions are limited to image types the
+// upload pipeline (JPEG/PNG/WebP) actually produces. Case-insensitive on the
+// extension so .JPG / .JPEG are not rejected on a roundtrip.
+const PHOTO_OBJECT_PATH_RE =
+  /^incoming\/[^/]+\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.(jpe?g|png|webp)$/i;
+const PHOTO_BUCKET = "alcance-photos";
+
+/** Reduce a stored entry to its bucket-relative object key, or null if the
+ *  shape isn't one we mint. Mirrors view-photo.toObjectPath but returns null
+ *  on anything suspicious so caller can fail-closed. */
+function extractObjectKey(entry: string): string | null {
+  if (typeof entry !== "string" || entry.length === 0) return null;
+  // Reject leading slash and parent-traversal segments anywhere in the input
+  // BEFORE we slice — defense in depth in case the regex misses an encoding.
+  if (entry.startsWith("/")) return null;
+  if (entry.split("/").includes("..")) return null;
+
+  // Full https signed URL? Locate the bucket marker and extract the path.
+  if (/^https:\/\//i.test(entry)) {
+    const marker = `/${PHOTO_BUCKET}/`;
+    const idx = entry.indexOf(marker);
+    if (idx < 0) return null;
+    const afterPrefix = entry.slice(idx + marker.length);
+    const qIdx = afterPrefix.indexOf("?");
+    const key = qIdx >= 0 ? afterPrefix.slice(0, qIdx) : afterPrefix;
+    if (!key || key.startsWith("/") || key.split("/").includes("..")) return null;
+    return key;
+  }
+  // Bare object key.
+  return entry;
+}
+
+/** Validate an LLM-supplied entry. Optional `expectedPhone` tightens the
+ *  shape to `incoming/<phone>/...` when we have the session phone. */
+export function isValidPhotoEntry(entry: string, expectedPhone?: string): boolean {
+  const key = extractObjectKey(entry);
+  if (!key) return false;
+  if (!PHOTO_OBJECT_PATH_RE.test(key)) return false;
+  if (expectedPhone) {
+    // [^/]+ in the base regex already isolates the phone segment.
+    const parts = key.split("/");
+    if (parts.length < 3) return false;
+    if (parts[1] !== expectedPhone) return false;
+  }
+  return true;
 }
 
 export interface AttachPhotosOutput {
@@ -44,7 +108,16 @@ export async function attachPhotos(
     });
   }
 
-  // Ownership check.
+  const expectedPhone = await resolveSessionPhone(ctx);
+  for (const entry of photoUrls) {
+    if (!isValidPhotoEntry(entry, expectedPhone)) {
+      return err(
+        "photo_urls contained an entry that is not a recognised alcance-photos signed URL or incoming/<phone>/<uuid>.<ext> object key",
+        { code: "invalid_photo_url" }
+      );
+    }
+  }
+
   const ownershipErr = await verifyOtOwnership(ctx, otRowId, arqRowId);
   if (ownershipErr) return ownershipErr;
 
@@ -85,6 +158,22 @@ export async function attachPhotos(
   });
 
   return ok({ ot_row_id: otRowId, total_photos: updatedPaths.length });
+}
+
+async function resolveSessionPhone(ctx: ToolContext): Promise<string | undefined> {
+  const sessionId = ctx.session_id;
+  if (!sessionId) return undefined;
+  try {
+    const { data } = await ctx.supabase
+      .from("sessions")
+      .select("phone")
+      .eq("id", sessionId)
+      .maybeSingle();
+    const phone = data?.phone;
+    return typeof phone === "string" && phone.length > 0 ? phone : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 // Architects scope OTs BEFORE execution. States 1-4 are pre-execution
