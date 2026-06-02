@@ -111,6 +111,22 @@ async function main() {
     { timezone: "America/Bogota" }
   );
 
+  cron.schedule(
+    "59 23 * * *",
+    async () => {
+      try {
+        await worker.refreshAll();
+        const r = await worker.snapshotOtsDaily();
+        log.info("daily snapshot cron ok", r);
+      } catch (e) {
+        log.error("daily snapshot cron failed", {
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    },
+    { timezone: "America/Bogota" }
+  );
+
   process.on("SIGUSR1", () => {
     log.info("on-demand refresh signaled");
     worker.refreshAll().catch((e) =>

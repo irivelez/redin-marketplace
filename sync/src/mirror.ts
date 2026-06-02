@@ -8,12 +8,35 @@ import {
   type Json,
   type ServerClient,
 } from "@redin/shared";
-import { AppSheetReadClient, MIRROR_TABLES, type AppSheetOT } from "./appsheet";
+import {
+  AppSheetReadClient,
+  MIRROR_TABLES,
+  type AppSheetOT,
+  type AppSheetCosto,
+} from "./appsheet";
 
 interface AppSheetContacto extends Record<string, string | undefined> {
   "Row ID"?: string;
   ID_Contacto?: string;
   Telefono?: string;
+}
+
+function appsheetDate(s: string | undefined): string | null {
+  if (!s) return null;
+  const datePart = s.split(" ")[0] ?? "";
+  const parts = datePart.split("/");
+  if (parts.length !== 3) return null;
+  const mm = parseInt(parts[0] ?? "", 10);
+  const dd = parseInt(parts[1] ?? "", 10);
+  const yyyy = parseInt(parts[2] ?? "", 10);
+  if (!Number.isFinite(mm) || !Number.isFinite(dd) || !Number.isFinite(yyyy)) return null;
+  return `${yyyy.toString().padStart(4, "0")}-${mm.toString().padStart(2, "0")}-${dd.toString().padStart(2, "0")}`;
+}
+
+function appsheetNumeric(s: string | undefined): number | null {
+  if (s === undefined || s === null || s === "") return null;
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
 }
 
 // Cap on how many customer-rating WhatsApps the cron can enqueue per run.
@@ -79,6 +102,7 @@ export class SyncWorker {
     results.push(await this.mirrorActividades());
     results.push(await this.mirrorContactos());
     results.push(await this.mirrorOts());
+    results.push(await this.mirrorCostosEjecucion());
     // Post-mirror: enqueue customer rating WhatsApps for OTs that just
     // transitioned to "Terminado" (per AppSheet). Failures here must never
     // fail the sync — log and continue.
@@ -163,6 +187,74 @@ export class SyncWorker {
       }),
     });
   }
+  private async mirrorCostosEjecucion(): Promise<MirrorResult> {
+    return this.mirrorGeneric<AppSheetCosto>({
+      tableName: MIRROR_TABLES.COSTOS,
+      mirror: "costos_ejecucion_mirror",
+      extract: (row) => ({
+        row_id: (row["Row ID"] as string | undefined)?.trim() ?? "",
+        data: row as unknown as Json,
+        ot_id: stringOrNull(row.ID_Orden),
+        estado: stringOrNull(row.ESTADO),
+        fecha_gasto: appsheetDate(row.Fecha_Gasto),
+        valor_gasto: appsheetNumeric(row.Valor_Gasto),
+        categoria: stringOrNull(row.Categoria),
+      }),
+    });
+  }
+
+  async snapshotOtsDaily(): Promise<{ snapshot_date: string; rows_written: number; error?: string }> {
+    const snapshotDate = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Bogota",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+
+    const { data: ots, error: fetchError } = await this.supabase
+      .from("ots_mirror")
+      .select("row_id, estado, ciudad, data");
+    if (fetchError) {
+      log.error("snapshot fetch failed", { error: fetchError.message });
+      return { snapshot_date: snapshotDate, rows_written: 0, error: fetchError.message };
+    }
+    if (!ots || ots.length === 0) {
+      return { snapshot_date: snapshotDate, rows_written: 0 };
+    }
+
+    const rows = ots.map((o) => {
+      const d = o.data as Record<string, unknown> | null;
+      const cliente =
+        d && typeof d.ID_Cliente === "string" && d.ID_Cliente.trim() !== ""
+          ? d.ID_Cliente.trim()
+          : null;
+      return {
+        snapshot_date: snapshotDate,
+        row_id: o.row_id,
+        estado: o.estado,
+        cliente,
+        ciudad: o.ciudad,
+        data: o.data as Json,
+      };
+    });
+
+    let written = 0;
+    for (const b of chunk(rows, 500)) {
+      const { error } = await this.supabase
+        // @ts-expect-error — table introduced in migration 018; not yet in generated Database types
+        .from("ots_daily_snapshot")
+        // @ts-expect-error — row shape matches migration 018; gen-types regen pending
+        .upsert(b, { onConflict: "snapshot_date,row_id" });
+      if (error) {
+        log.error("snapshot upsert failed", { error: error.message });
+        return { snapshot_date: snapshotDate, rows_written: written, error: error.message };
+      }
+      written += b.length;
+    }
+    log.info("daily snapshot ok", { snapshot_date: snapshotDate, rows_written: written });
+    return { snapshot_date: snapshotDate, rows_written: written };
+  }
+
   private async mirrorContactos(): Promise<MirrorResult> {
     return this.mirrorGeneric<AppSheetContacto>({
       tableName: MIRROR_TABLES.CONTACTOS,
@@ -357,7 +449,8 @@ export class SyncWorker {
       | "clientes_mirror"
       | "arquitectos_mirror"
       | "actividades_mirror"
-      | "contactos_mirror";
+      | "contactos_mirror"
+      | "costos_ejecucion_mirror";
     extract: (row: T) => {
       row_id: string;
       data: Json;
@@ -366,6 +459,10 @@ export class SyncWorker {
       estado?: string | null;
       id_contacto?: string | null;
       telefono?: string | null;
+      ot_id?: string | null;
+      fecha_gasto?: string | null;
+      valor_gasto?: number | null;
+      categoria?: string | null;
     };
   }): Promise<MirrorResult> {
     const start = Date.now();
@@ -382,6 +479,7 @@ export class SyncWorker {
       let upserted = 0;
       for (const b of batches) {
         const { error } = await this.supabase
+          // @ts-expect-error — costos_ejecucion_mirror added in migration 017; gen-types regen pending
           .from(params.mirror)
           // @ts-expect-error — Supabase typing gets cranky about union of mirror row shapes
           .upsert(b, { onConflict: "row_id" });

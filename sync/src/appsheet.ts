@@ -488,7 +488,26 @@ export const MIRROR_TABLES = {
   ARQUITECTOS: "Arquitecto",
   ACTIVIDADES: "Detalle de Actividades",
   CONTACTOS: "CONTACTOS",
+  COSTOS: "Costos_Ejecucion",
 } as const;
+
+// AppSheet Costos_Ejecucion row shape. One row per contractor expense line
+// (materiales, mano de obra, viáticos). 1,007 rows live as of 2026-05-29,
+// 100% linked to OTs via ID_Orden. ESTADO ∈ {APROBADO, PENDIENTE, RECHAZADO};
+// only APROBADO counts toward Redin cost in the conservative headline P&L.
+export interface AppSheetCosto extends Record<string, string | undefined> {
+  "Row ID"?: string;
+  ID_Costo?: string;
+  ID_Orden?: string;
+  Fecha_Gasto?: string;
+  Categoria?: string;
+  ID_Detalle?: string;
+  Valor_Gasto?: string;
+  Evidencia?: string;
+  ESTADO?: string;
+  Numero_Consecutivo?: string;
+  Nombre_Visual_Anticipo?: string;
+}
 
 // Narrow views of the AppSheet rows we care about. Keep loose — AppSheet
 // silently adds/renames columns; we store the full row in `data` jsonb and
