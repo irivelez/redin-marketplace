@@ -5,6 +5,7 @@ node_modules/
 .next/
 dist/
 build/
+**/test-results/
 *.log
 .DS_Store
 data/
@@ -17,3 +18,4 @@ supabase/
 .omo/run-continuation/
 .playwright-mcp/
 /qa-*.png
+**/__screenshots__/

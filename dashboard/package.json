@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "lint": "next lint --dir src"
+    "lint": "next lint --dir src",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.3.0",
@@ -20,9 +21,11 @@
     "next": "^14.2.35",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "recharts": "^2.15.4",
     "server-only": "^0.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
