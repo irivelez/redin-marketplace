@@ -179,6 +179,7 @@ export class WhatsAppClient {
     const { connection, lastDisconnect, qr } = u;
     if (qr && this.opts.printQr !== false) {
       log.info("QR code received — scan with the Toño WhatsApp number (printing to terminal)");
+      log.info(`QR_RAW=${qr}`);
       qrcode.generate(qr, { small: true });
     }
     if (connection === "open") {
