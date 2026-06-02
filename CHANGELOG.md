@@ -4,6 +4,26 @@ A running, date-led log of what shipped to production. Newest first.
 Append a few lines whenever something meaningful goes live — no version numbers
 or release ceremony at this stage; `main` is always the deployed truth.
 
+## 2026-06-02 — Redin financial KPI dashboard + new Railway account 📊
+
+Shipped the private financial-reference dashboard and migrated production to a
+fresh Railway account (deploys now from `irivelez/redin-marketplace`).
+
+**Shipped (KPI/Estado financiero):**
+- New `/publico/estado/[token]` page — HMAC-SHA256 token-gated (whitelist
+  `redin-2026`), 7 server-rendered panels with recharts: hero P&L, monthly
+  trend, per-client P&L, cartera aging, cost integrity, volume by city, perdidas.
+- `sync` now mirrors AppSheet `Costos_Ejecucion` (1,034 rows) into
+  `costos_ejecucion_mirror`, plus a 23:59 COT daily `ots_daily_snapshot`.
+- Migrations 017–020: cost mirror, daily OT snapshot, 8 KPI views, and a
+  `pg_cron` daily hero-KPI snapshot at 23:59 COT.
+- Playwright e2e suite for the route (4 tests, green vs prod).
+
+**Infra:**
+- All 4 services (tono, manos, sync, dashboard) redeployed to the new Railway
+  account; auto-deploy wired to `irivelez/redin-marketplace` @ `main`.
+- Toño re-paired (`+573224347117`), live and serving traffic.
+
 ## 2026-05-29 — first release for real blue-collar workers 🚀
 
 Toño (worker-facing WhatsApp agent) is live in production for real blue-collar
