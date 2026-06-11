@@ -42,12 +42,24 @@ export interface InboundMedia {
   kind: "image" | "document";
 }
 
+// A media item the worker sent that we could NOT ingest (download from WA
+// failed, or the Storage upload failed). Surfaced to the agent so the LLM
+// turn knows a photo was attempted — the delivery layer has ALREADY sent the
+// user-facing "reenvíamela" fallback by the time this reaches the handler.
+export interface InboundMediaFailure {
+  kind: "image" | "document";
+  reason: "download" | "storage";
+}
+
+type MediaResult = InboundMedia | { failed: true; reason: "download" | "storage" };
+
 export interface WhatsAppHandlers {
   onMessage: (ev: {
     phone: string;
     text: string;
     jid: string;
     media?: InboundMedia[];
+    media_failures?: InboundMediaFailure[];
   }) => Promise<void>;
   onReady?: () => void | Promise<void>;
 }
@@ -65,6 +77,7 @@ interface PendingBatch {
   jid: string;
   texts: string[];
   medias: InboundMedia[];
+  mediaFailures: InboundMediaFailure[];
   idleTimer: NodeJS.Timeout;
   maxAgeTimer: NodeJS.Timeout;
   firstAt: number;
@@ -277,14 +290,19 @@ export class WhatsAppClient {
         captionRaw.length > INPUT_CAPS.whatsapp
           ? captionRaw.slice(0, INPUT_CAPS.whatsapp)
           : captionRaw;
-      const media = await this.downloadAndStore(msg, phone, {
+      const result = await this.downloadAndStore(msg, phone, {
         ext: "jpg",
         mime: "image/jpeg",
         kind: "image",
       });
-      if (media) media.caption = caption;
       const text = caption.length > 0 ? caption : "[foto]";
-      this.enqueue(phone, jid, text, media);
+      if ("failed" in result) {
+        await this.notifyMediaFailure(jid, "image");
+        this.enqueue(phone, jid, text, null, { kind: "image", reason: result.reason });
+        return;
+      }
+      result.caption = caption;
+      this.enqueue(phone, jid, text, result);
       return;
     }
 
@@ -302,15 +320,20 @@ export class WhatsAppClient {
       const fileName = docMsg.fileName ?? "documento.pdf";
       const ext = (fileName.split(".").pop() ?? "pdf").toLowerCase();
       const mime = docMsg.mimetype ?? "application/pdf";
-      const media = await this.downloadAndStore(msg, phone, {
+      const result = await this.downloadAndStore(msg, phone, {
         ext,
         mime,
         kind: "document",
         filename: fileName,
       });
-      if (media) media.caption = caption;
       const text = caption.length > 0 ? caption : `[documento: ${fileName}]`;
-      this.enqueue(phone, jid, text, media);
+      if ("failed" in result) {
+        await this.notifyMediaFailure(jid, "document");
+        this.enqueue(phone, jid, text, null, { kind: "document", reason: result.reason });
+        return;
+      }
+      result.caption = caption;
+      this.enqueue(phone, jid, text, result);
       return;
     }
 
@@ -335,7 +358,13 @@ export class WhatsAppClient {
   // flushBatch, which is idempotent w.r.t. the entry being gone (it just
   // returns early). Note: we accept null media (text-only) but text-only
   // messages with empty text were already rejected by the caller.
-  private enqueue(phone: string, jid: string, text: string, media: InboundMedia | null): void {
+  private enqueue(
+    phone: string,
+    jid: string,
+    text: string,
+    media: InboundMedia | null,
+    mediaFailure?: InboundMediaFailure
+  ): void {
     let entry = this.pending.get(phone);
     if (!entry) {
       const now = Date.now();
@@ -345,6 +374,7 @@ export class WhatsAppClient {
         jid,
         texts: [],
         medias: [],
+        mediaFailures: [],
         idleTimer,
         maxAgeTimer,
         firstAt: now,
@@ -356,6 +386,7 @@ export class WhatsAppClient {
     }
     if (text.length > 0) entry.texts.push(text);
     if (media) entry.medias.push(media);
+    if (mediaFailure) entry.mediaFailures.push(mediaFailure);
   }
 
   // Drain the per-phone batch into a single onMessage call. MUST clear
@@ -370,7 +401,13 @@ export class WhatsAppClient {
     clearTimeout(entry.idleTimer);
     clearTimeout(entry.maxAgeTimer);
     this.pending.delete(phone);
-    if (entry.texts.length === 0 && entry.medias.length === 0) return;
+    if (
+      entry.texts.length === 0 &&
+      entry.medias.length === 0 &&
+      entry.mediaFailures.length === 0
+    ) {
+      return;
+    }
     const joinedText = entry.texts.join("\n");
     this.opts.handlers
       .onMessage({
@@ -378,6 +415,8 @@ export class WhatsAppClient {
         text: joinedText,
         jid: entry.jid,
         media: entry.medias.length > 0 ? entry.medias : undefined,
+        media_failures:
+          entry.mediaFailures.length > 0 ? entry.mediaFailures : undefined,
       })
       .catch((e) => {
         log.error("batched onMessage failed", {
@@ -394,21 +433,48 @@ export class WhatsAppClient {
   // 24h signed URL so the LLM can preview if needed AND can re-use the
   // path when calling upload_documento (which accepts a pre-existing
   // storage_path without re-uploading).
+  // Sends the delivery-layer fallback when a photo/PDF could not be ingested.
+  // Deliberately does NOT wait for the LLM turn: the worker must hear "resend
+  // it" within seconds, not after a 10-20s agent round-trip (May25-Carlos
+  // re-send regression).
+  private async notifyMediaFailure(jid: string, kind: "image" | "document"): Promise<void> {
+    const body =
+      kind === "image"
+        ? "Hubo un problema recibiendo la última foto, ¿me la puedes reenviar por favor?"
+        : "Hubo un problema recibiendo el último archivo, ¿me lo puedes reenviar por favor?";
+    try {
+      await this.sendText(jid, body);
+    } catch (e) {
+      log.error("media-failure fallback send failed", {
+        jid,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
   private async downloadAndStore(
     msg: WAMessage,
     phone: string,
     args: { ext: string; mime: string; kind: "image" | "document"; filename?: string }
-  ): Promise<InboundMedia | null> {
+  ): Promise<MediaResult> {
+    let buffer: Buffer;
     try {
       if (!this.sock) {
         log.warn("downloadAndStore: socket not ready", { phone });
-        return null;
+        return { failed: true, reason: "download" };
       }
-      const buffer = (await downloadMediaMessage(msg, "buffer", {}, {
+      buffer = (await downloadMediaMessage(msg, "buffer", {}, {
         logger: pino({ level: "silent" }) as unknown as pino.Logger,
         reuploadRequest: this.sock.updateMediaMessage,
       })) as Buffer;
-
+    } catch (e) {
+      log.error("downloadAndStore: media download threw", {
+        phone,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return { failed: true, reason: "download" };
+    }
+    try {
       const uuid = randomUUID();
       const cleanExt = args.ext.replace(/[^a-z0-9]/gi, "").slice(0, 8) || "bin";
       const storagePath = `incoming/${phone}/${Date.now()}-${uuid}.${cleanExt}`;
@@ -422,7 +488,7 @@ export class WhatsAppClient {
         });
       if (upErr) {
         log.error("inbound media upload failed", { phone, error: upErr.message });
-        return null;
+        return { failed: true, reason: "storage" };
       }
 
       const { data: signed } = await this.opts.supabase.storage
@@ -451,7 +517,7 @@ export class WhatsAppClient {
         phone,
         error: e instanceof Error ? e.message : String(e),
       });
-      return null;
+      return { failed: true, reason: "storage" };
     }
   }
 }

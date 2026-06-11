@@ -39,7 +39,7 @@ async function main() {
           number_env: process.env.WA_NUMBER ?? "(unset)",
         });
       },
-      onMessage: async ({ phone, text, jid, media }) => {
+      onMessage: async ({ phone, text, jid, media, media_failures }) => {
         mutex
           .run(phone, async () => {
             const toolCtx = makeDefaultToolContext({
@@ -54,6 +54,7 @@ async function main() {
               toolCtx,
               jid,
               media,
+              media_failures,
             });
             log.info("handled", {
               phone,

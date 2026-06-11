@@ -35,7 +35,7 @@ import {
 } from "@redin/tools";
 import { runTurn, ModelUnavailableError, type ConversationTurn } from "./llm";
 import { SessionStore } from "./session";
-import type { InboundMedia } from "./whatsapp";
+import type { InboundMedia, InboundMediaFailure } from "./whatsapp";
 import { wrapData } from "./prompts/data-wrap";
 import {
   createTurnSession,
@@ -72,6 +72,13 @@ export interface HandleMessageInput {
    * accepts them directly without re-uploading.
    */
   media?: InboundMedia[];
+  /**
+   * Media the worker SENT but the WA layer could not ingest (2026-06-11
+   * silent-drop fix). whatsapp.ts already messaged the worker asking for a
+   * re-send; agent.ts injects one `[MEDIA_FAILED: …]` sentinel per item so
+   * the LLM knows a photo was attempted and must NOT claim it arrived.
+   */
+  media_failures?: InboundMediaFailure[];
 }
 
 export interface HandleMessageResult {
@@ -666,6 +673,9 @@ export async function handleMessage(
     contextLines.push(
       `[MEDIA_RECEIVED: kind=${m.kind} mime=${m.mime} storage_path=${m.storage_path} filename=${m.filename}]`
     );
+  }
+  for (const f of input.media_failures ?? []) {
+    contextLines.push(`[MEDIA_FAILED: kind=${f.kind} reason=${f.reason}]`);
   }
   const userMessage = `${contextLines.join("\n")}\n${wrapData(text, "tecnico")}`;
 
