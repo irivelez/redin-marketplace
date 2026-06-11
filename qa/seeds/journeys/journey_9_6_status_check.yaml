@@ -1,7 +1,7 @@
 name: journey_9_6_status_check
 prd_ref: "§9.6"
 category: journey
-description: "Carlos asks Toño about the status of his applications (técnico-initiated pull). Toño calls read_my_postulaciones and narrates the results clearly."
+description: "Carlos asks Toño about the status of his applications (técnico-initiated pull). Toño calls read_my_postulaciones and narrates the results clearly. Fixture choice (a): tecnico_with_pending_postulacion extends the post-approval Bogotá fixture (candidate_state=approved + profile_complete=true + cedula) — only approved workers have postulaciones to check."
 db_fixtures:
   - tecnico_with_pending_postulacion
 

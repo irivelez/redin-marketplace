@@ -324,13 +324,20 @@ async function seedTecnicoRegisteredBogotaElectrico(
 ): Promise<FixtureRefs> {
   const supabase = createServerClient();
   const tecnico_id = `TEST_bogel01_${testPhone.slice(-6)}`;
+  const cedula = testCedulaFor(testPhone);
 
-  // tecnicos_extended columns: tecnico_id, phone, lider_phone, estado, onboarded_at, source, appsheet_synced_at
+  // Post-approval state (candidate_state="approved", profile_complete=true,
+  // cedula set) is required by the journeys/refusals that read this fixture —
+  // router.ts APPROVAL_GATED_TOOLS blocks read_pending_ots / create_postulacion
+  // for any other state, which is the correct production behavior.
   const { error: extErr } = await supabase.from("tecnicos_extended").upsert({
     tecnico_id,
     phone: testPhone,
     estado: "activo",
     source: "warm",
+    candidate_state: "approved",
+    profile_complete: true,
+    cedula,
   });
   if (extErr) throw new Error(`fixture tecnicos_extended bogota_electrico: ${extErr.message}`);
 
@@ -378,12 +385,17 @@ async function seedTecnicoRegisteredCaliPlomero(
 ): Promise<FixtureRefs> {
   const supabase = createServerClient();
   const tecnico_id = `TEST_calpl01_${testPhone.slice(-6)}`;
+  const cedula = testCedulaFor(testPhone);
 
+  // Post-approval state — see seedTecnicoRegisteredBogotaElectrico for rationale.
   const { error: extErr } = await supabase.from("tecnicos_extended").upsert({
     tecnico_id,
     phone: testPhone,
     estado: "activo",
     source: "warm",
+    candidate_state: "approved",
+    profile_complete: true,
+    cedula,
   });
   if (extErr) throw new Error(`fixture tecnicos_extended cali_plomero: ${extErr.message}`);
 

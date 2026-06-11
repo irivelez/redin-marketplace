@@ -1,7 +1,7 @@
 name: journey_9_5_contract
 prd_ref: "§9.5"
 category: journey
-description: "Técnico Sofía has a signed contract. She messages asking about it. Toño retrieves contract status and explains next steps without promising dates."
+description: "Técnico Sofía has a signed contract. She messages asking about it. Toño retrieves contract status and explains next steps without promising dates. Fixture choice (a): tecnico_with_signed_contract extends the post-approval Bogotá fixture (candidate_state=approved + profile_complete=true + cedula) — a worker with a signed contract is necessarily already approved."
 db_fixtures:
   - tecnico_with_signed_contract
 

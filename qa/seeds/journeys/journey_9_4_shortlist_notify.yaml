@@ -1,7 +1,7 @@
 name: journey_9_4_shortlist_notify
 prd_ref: "§9.4"
 category: journey
-description: "HR has shortlisted Andrés. Toño notifies him via WhatsApp when he messages in. Técnico asks what preseleccionado means."
+description: "HR has shortlisted Andrés. Toño notifies him via WhatsApp when he messages in. Técnico asks what preseleccionado means. Fixture choice (a): tecnico_with_pending_postulacion extends the post-approval Bogotá fixture (candidate_state=approved + profile_complete=true + cedula) — the journey tests post-shortlist UX, not the approval gate."
 db_fixtures:
   - tecnico_with_pending_postulacion
 

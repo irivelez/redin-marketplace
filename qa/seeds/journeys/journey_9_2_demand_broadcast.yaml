@@ -1,7 +1,7 @@
 name: journey_9_2_demand_broadcast
 prd_ref: "§9.2"
 category: journey
-description: "A new OT is broadcast to matching técnicos. Técnico receives the broadcast, Toño presents the OT, técnico applies via create_postulacion."
+description: "A new OT is broadcast to matching técnicos. Técnico receives the broadcast, Toño presents the OT, técnico applies via create_postulacion. Fixture choice (a): tecnico_registered_bogota_electrico seeds candidate_state=approved + profile_complete=true + cedula — the journey tests post-approval behavior, not the approval gate."
 db_fixtures:
   - tecnico_registered_bogota_electrico
   - open_ot_bogota_electrico

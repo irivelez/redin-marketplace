@@ -1,7 +1,7 @@
 name: journey_9_3_pull_apply
 prd_ref: "§9.3"
 category: journey
-description: "Registered técnico proactively asks for available work, Toño shows matching OTs, técnico selects one and applies."
+description: "Registered técnico proactively asks for available work, Toño shows matching OTs, técnico selects one and applies. Fixture choice (a): tecnico_registered_cali_plomero seeds candidate_state=approved + profile_complete=true + cedula — the journey tests post-approval pull-and-apply, not the approval gate."
 db_fixtures:
   - tecnico_registered_cali_plomero
   - open_ot_cali_plomero
