@@ -66,6 +66,21 @@ const THINKING_ENABLED = (() => {
   return !["0", "false", "no", "off"].includes(raw.toLowerCase());
 })();
 
+// 2026-06-11 (Step-2c latency fix): per-iteration thinking gate.
+// Principle: intelligence at decision points, deterministic composition after
+// tool returns. iter 0 picks tools / applies policy / handles refusal+escalation
+// — thinking stays ON. iter >= 1 composes the reply from a tool's
+// suggested_reply (L26 "las herramientas mandan") — thinking is pure latency
+// tax there, so we drop it. Targets ~30-40% p95 cut on tool-using turns.
+//
+// Off-switch: TONO_ITER1_THINKING=on restores thinking on ALL iterations
+// (pre-fix behavior) for a no-code revert in Railway env.
+const ITER1_THINKING_ENABLED = (() => {
+  const raw = process.env.TONO_ITER1_THINKING;
+  if (!raw) return false;
+  return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+})();
+
 // Budget for the hidden reasoning. Min 1024 (Anthropic API constraint).
 // 2026-05-28: dropped default 2000 → 1024 after Julian's live test showed
 // 12.6s avg turn latency. Lower budget shaves ~2-3s per turn while keeping
@@ -417,6 +432,43 @@ async function createMessageWithRetry(
   }
 }
 
+// Master switch THINKING_ENABLED gates everything; when on, iter 0 always
+// thinks, iter >= 1 thinks only under the ITER1 override.
+function thinkingEnabledForIter(iter: number): boolean {
+  return THINKING_ENABLED && (iter === 0 || ITER1_THINKING_ENABLED);
+}
+
+// Assemble Anthropic params for a single runTurn iteration. Exported as a pure
+// test seam (scripts/smoke-iter-thinking.ts). Anthropic rejects `temperature`
+// with thinking on, so the two branches are mutually exclusive on that field.
+export function buildIterParams(
+  iter: number,
+  parts: {
+    system: Anthropic.TextBlockParam[];
+    tools: Anthropic.Tool[];
+    messages: Anthropic.MessageParam[];
+  }
+): Anthropic.MessageCreateParamsNonStreaming {
+  const { system, tools, messages } = parts;
+  return thinkingEnabledForIter(iter)
+    ? {
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        system,
+        tools,
+        messages,
+        thinking: { type: "enabled", budget_tokens: THINKING_BUDGET },
+      }
+    : {
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        temperature: TEMPERATURE,
+        system,
+        tools,
+        messages,
+      };
+}
+
 export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
   const c = getClient();
   const messages = toAnthropicMessages(input.history, input.userMessage);
@@ -430,29 +482,11 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
     const t0 = Date.now();
     let response: Anthropic.Message;
     try {
-      // Gap A.3: build params conditionally. With thinking enabled,
-      // temperature must be omitted (API rejects the combination).
-      const system = systemForAnthropic();
-      const params: Anthropic.MessageCreateParamsNonStreaming = THINKING_ENABLED
-        ? {
-            model: MODEL,
-            max_tokens: MAX_TOKENS,
-            system,
-            tools,
-            messages,
-            thinking: {
-              type: "enabled",
-              budget_tokens: THINKING_BUDGET,
-            },
-          }
-        : {
-            model: MODEL,
-            max_tokens: MAX_TOKENS,
-            temperature: TEMPERATURE,
-            system,
-            tools,
-            messages,
-          };
+      const params = buildIterParams(iter, {
+        system: systemForAnthropic(),
+        tools,
+        messages,
+      });
       response = await createMessageWithRetry(c, params, input.toolCtx, TIMEOUT_MS);
     } catch (e) {
       const latency_ms = Date.now() - t0;
@@ -504,6 +538,8 @@ export async function runTurn(input: RunTurnInput): Promise<RunTurnResult> {
       latency_ms,
       tool_calls: toolCallsMeta,
       grounded,
+      iter_index: iter,
+      thinking_enabled: thinkingEnabledForIter(iter),
     });
 
     if (toolUseBlocks.length === 0) {

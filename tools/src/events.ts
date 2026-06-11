@@ -49,6 +49,11 @@ export interface LlmCallMeta {
   latency_ms: number;
   tool_calls: { name: string; args_keys: string[] }[];
   grounded: boolean;
+  // Optional/additive so existing callers (manos/src/llm.ts) keep compiling.
+  /** 0-based runTurn iteration: 0 = decision-making, >= 1 = reply composition. */
+  iter_index?: number;
+  /** Whether extended thinking ran on this iteration's messages.create. */
+  thinking_enabled?: boolean;
 }
 
 export interface LlmErrorMeta {
