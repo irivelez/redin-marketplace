@@ -86,6 +86,13 @@ interface PendingBatch {
 const BATCH_IDLE_MS = 2000;
 const BATCH_MAX_AGE_MS = 8000;
 
+// S12: secondary text-dedup window. WhatsApp sometimes retransmits the same
+// text with a FRESH message id (observed across 4 sessions: May25-Carlos,
+// May28-juanpablo, May28-irina-tono, May28-julian), so the seenMessageIds
+// primary dedup misses it. Same phone + identical text within this window
+// is treated as a retransmission and dropped. Text-only; media is exempt.
+const TEXT_RETRANSMIT_WINDOW_MS = 3000;
+
 export interface WhatsAppOptions {
   authDir: string;
   handlers: WhatsAppHandlers;
@@ -101,6 +108,9 @@ export class WhatsAppClient {
   private reconnecting = false;
   private seenMessageIds = new Set<string>();
   private pending = new Map<string, PendingBatch>();
+  // S12 belt-and-suspenders dedup (see TEXT_RETRANSMIT_WINDOW_MS). One entry
+  // per phone, overwritten on every accepted text — bounded below at 500.
+  private recentTextByPhone = new Map<string, { text: string; at: number }>();
 
   constructor(private opts: WhatsAppOptions) {
     fs.mkdirSync(opts.authDir, { recursive: true });
@@ -296,6 +306,12 @@ export class WhatsAppClient {
         kind: "image",
       });
       const text = caption.length > 0 ? caption : "[foto]";
+      log.info("inbound", {
+        phone,
+        msgId,
+        text_preview: text.slice(0, 60),
+        dedup_decision: "media_exempt",
+      });
       if ("failed" in result) {
         await this.notifyMediaFailure(jid, "image");
         this.enqueue(phone, jid, text, null, { kind: "image", reason: result.reason });
@@ -327,6 +343,12 @@ export class WhatsAppClient {
         filename: fileName,
       });
       const text = caption.length > 0 ? caption : `[documento: ${fileName}]`;
+      log.info("inbound", {
+        phone,
+        msgId,
+        text_preview: text.slice(0, 60),
+        dedup_decision: "media_exempt",
+      });
       if ("failed" in result) {
         await this.notifyMediaFailure(jid, "document");
         this.enqueue(phone, jid, text, null, { kind: "document", reason: result.reason });
@@ -348,6 +370,32 @@ export class WhatsAppClient {
     if (text.length > INPUT_CAPS.whatsapp) {
       log.warn("inbound message truncated", { phone, original_len: text.length, cap: INPUT_CAPS.whatsapp });
       safeText = text.slice(0, INPUT_CAPS.whatsapp);
+    }
+
+    const now = Date.now();
+    const last = this.recentTextByPhone.get(phone);
+    const isRetransmission =
+      last !== undefined &&
+      last.text === safeText &&
+      now - last.at < TEXT_RETRANSMIT_WINDOW_MS;
+    log.info("inbound", {
+      phone,
+      msgId,
+      text_preview: safeText.slice(0, 60),
+      dedup_decision: isRetransmission ? "dropped_retransmission" : "enqueued",
+    });
+    if (isRetransmission) {
+      log.warn("dropped likely retransmission (phone+text+3s)", {
+        phone,
+        msgId,
+        text_preview: safeText.slice(0, 60),
+      });
+      return;
+    }
+    this.recentTextByPhone.set(phone, { text: safeText, at: now });
+    if (this.recentTextByPhone.size > 500) {
+      const oldest = this.recentTextByPhone.keys().next().value;
+      if (oldest !== undefined) this.recentTextByPhone.delete(oldest);
     }
     this.enqueue(phone, jid, safeText, null);
   }
