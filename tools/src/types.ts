@@ -23,10 +23,15 @@ export interface ToolError {
   // Tool-driven control signals. Used when the tool refuses but knows what
   // the agent should ask the user next — the agent reads these and follows
   // them verbatim (see Toño's REGLA ABSOLUTA on next_action). Currently
-  // populated by register_tecnico's INCOMPLETE_IDENTITY rejection.
+  // populated by register_tecnico's INCOMPLETE_IDENTITY rejection and by
+  // upload_documento's failure paths (2026-06-11 ack fix).
   next_action?: string;
   missing?: string[];
   user_message_hint?: string;
+  // How the agent should recover from this failure (2026-06-11, upload ack
+  // fix): retry the tool call, ask the worker for a non-photo alternative,
+  // or escalate. Only upload_documento populates this today.
+  suggested_recovery?: "retry_upload" | "request_text_alternative" | "escalate_to_hr";
 }
 export type ToolResult<T> = ToolSuccess<T> | ToolError;
 
@@ -41,6 +46,7 @@ export function err(
     next_action?: string;
     missing?: string[];
     user_message_hint?: string;
+    suggested_recovery?: ToolError["suggested_recovery"];
   }
 ): ToolError {
   return {
@@ -51,6 +57,7 @@ export function err(
     next_action: opts?.next_action,
     missing: opts?.missing,
     user_message_hint: opts?.user_message_hint,
+    suggested_recovery: opts?.suggested_recovery,
   };
 }
 
@@ -239,9 +246,27 @@ export interface UploadDocumentoInput {
   storage_path?: string;
   actor?: Actor;
 }
+// What the agent should do after a successful upload (2026-06-11 ack fix).
+// "request_back_side"        — cédula face 1 of 2 stored; ask for the back.
+// "proceed_to_screening"     — both cédula faces stored; continue the flow.
+// "request_next_doc"         — reserved; not produced today.
+// "wait_for_classification"  — mixed-type photo burst; classifier will sort it.
+// "done"                     — single supporting doc stored; nothing pending.
+export type UploadDocumentoNextAction =
+  | "request_back_side"
+  | "request_next_doc"
+  | "proceed_to_screening"
+  | "wait_for_classification"
+  | "done";
+
 export interface UploadDocumentoOutput {
   documento_id: string;
   storage_path: string;
+  document_type: DocumentoTipo;
+  // Verbatim Colombian-Spanish ack naming the document — the agent sends
+  // this (or a close paraphrase) so the worker always hears WHAT arrived.
+  suggested_reply: string;
+  next_action: UploadDocumentoNextAction;
 }
 
 // ---------- escalate_to_hr ----------

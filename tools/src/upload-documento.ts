@@ -9,6 +9,7 @@ import { recordEvent } from "./events";
 import type {
   ToolResult,
   UploadDocumentoInput,
+  UploadDocumentoNextAction,
   UploadDocumentoOutput,
 } from "./types";
 import { err, ok } from "./types";
@@ -37,18 +38,131 @@ function safeFilename(name: string): string {
   return base.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "file";
 }
 
+// How recently-created sibling rows count as "the same photo burst".
+// WhatsApp batching holds a burst ≤8s; one LLM turn adds ~15-30s.
+const BURST_WINDOW_MS = 60_000;
+
+const TIPO_LABELS: Record<string, { label: string; plural: boolean }> = {
+  cedula: { label: "tu cédula", plural: false },
+  evidencia_arl: { label: "tu ARL", plural: false },
+  arl: { label: "tu ARL", plural: false },
+  evidencia_eps: { label: "tu EPS", plural: false },
+  ss: { label: "tu seguridad social", plural: false },
+  cert_estudios: { label: "tu certificado de estudios", plural: false },
+  cert_trabajos_previos: { label: "tu constancia de trabajos", plural: false },
+  cert_electrica: { label: "tu certificación eléctrica", plural: false },
+  altura: { label: "tu certificado de alturas", plural: false },
+  antecedentes: { label: "tus antecedentes", plural: true },
+  otro: { label: "tu documento", plural: false },
+};
+
+interface AckCounts {
+  cedulaTotal: number;
+  burstSameTipo: number;
+  burstMixed: boolean;
+}
+
+// Counts come from rows ALREADY inserted (including the current one), so the
+// ack can name what we actually hold — never claim receipt of something that
+// failed to persist.
+async function loadAckCounts(
+  ctx: ToolContext,
+  tecnico_id: string,
+  tipo: string
+): Promise<AckCounts> {
+  const counts: AckCounts = { cedulaTotal: 0, burstSameTipo: 1, burstMixed: false };
+  try {
+    const sinceIso = new Date(Date.now() - BURST_WINDOW_MS).toISOString();
+    const { data: recent } = await ctx.supabase
+      .from("documentos")
+      .select("tipo")
+      .eq("tecnico_id", tecnico_id)
+      .gte("created_at", sinceIso);
+    const rows = recent ?? [];
+    counts.burstSameTipo = Math.max(1, rows.filter((r) => r.tipo === tipo).length);
+    counts.burstMixed = rows.some((r) => r.tipo !== tipo);
+    if (tipo === "cedula") {
+      const { count } = await ctx.supabase
+        .from("documentos")
+        .select("id", { count: "exact", head: true })
+        .eq("tecnico_id", tecnico_id)
+        .eq("tipo", "cedula");
+      counts.cedulaTotal = count ?? 1;
+    }
+  } catch {
+    // Counting is best-effort: a failed count degrades to a generic ack,
+    // never to a failed upload.
+  }
+  return counts;
+}
+
+function buildAck(
+  tipo: string,
+  counts: AckCounts
+): { suggested_reply: string; next_action: UploadDocumentoNextAction } {
+  if (counts.burstMixed) {
+    return {
+      suggested_reply: "Recibí varias fotos. Las estoy clasificando.",
+      next_action: "wait_for_classification",
+    };
+  }
+  if (tipo === "cedula") {
+    if (counts.cedulaTotal <= 1) {
+      return {
+        suggested_reply:
+          "Listo, recibí tu cédula por la cara de adelante. Mándame ahora la de atrás.",
+        next_action: "request_back_side",
+      };
+    }
+    if (counts.cedulaTotal === 2) {
+      return {
+        suggested_reply: "Listo, recibí las dos caras de tu cédula. Sigamos.",
+        next_action: "proceed_to_screening",
+      };
+    }
+    return {
+      suggested_reply:
+        counts.burstSameTipo > 2
+          ? `Listo, recibí las ${counts.burstSameTipo} fotos de tu cédula. Sigamos.`
+          : "Listo, ya tengo las fotos de tu cédula. Sigamos.",
+      next_action: "proceed_to_screening",
+    };
+  }
+  const { label, plural } = TIPO_LABELS[tipo] ?? TIPO_LABELS["otro"]!;
+  if (counts.burstSameTipo > 1) {
+    return {
+      suggested_reply: `Listo, recibí las ${counts.burstSameTipo} fotos de ${label}. El equipo las revisa.`,
+      next_action: "done",
+    };
+  }
+  return {
+    suggested_reply: `Listo, recibí ${label}. El equipo ${plural ? "los" : "lo"} revisa.`,
+    next_action: "done",
+  };
+}
+
 export async function uploadDocumento(
   ctx: ToolContext,
   input: UploadDocumentoInput
 ): Promise<ToolResult<UploadDocumentoOutput>> {
-  if (!input.tecnico_id?.trim()) return err("tecnico_id required", { code: "invalid_input" });
+  const INVALID_INPUT_HINTS = {
+    user_message_hint: "Dame un segundo, estoy registrando tu foto.",
+    suggested_recovery: "retry_upload" as const,
+  };
+  if (!input.tecnico_id?.trim()) {
+    return err("tecnico_id required", { code: "invalid_input", ...INVALID_INPUT_HINTS });
+  }
   if (!VALID_TIPOS.has(input.tipo)) {
     return err(`tipo must be one of: ${[...VALID_TIPOS].join(", ")}`, {
       code: "invalid_input",
+      ...INVALID_INPUT_HINTS,
     });
   }
   if (!input.storage_path && !input.content) {
-    return err("either storage_path or content must be provided", { code: "invalid_input" });
+    return err("either storage_path or content must be provided", {
+      code: "invalid_input",
+      ...INVALID_INPUT_HINTS,
+    });
   }
 
   // Verify the técnico exists.
@@ -58,9 +172,22 @@ export async function uploadDocumento(
     .eq("tecnico_id", input.tecnico_id)
     .maybeSingle();
   if (tecErr) {
-    return err(`db error: ${tecErr.message}`, { code: "db_error", retryable: true });
+    return err(`db error: ${tecErr.message}`, {
+      code: "db_error",
+      retryable: true,
+      user_message_hint:
+        "Uy, se me trabó el sistema guardando tu foto. Dame un momento y lo intento de nuevo.",
+      suggested_recovery: "retry_upload",
+    });
   }
-  if (!tec) return err("tecnico_id not found", { code: "not_found" });
+  if (!tec) {
+    return err("tecnico_id not found", {
+      code: "not_found",
+      user_message_hint:
+        "Tuve un lío registrando tu documento. Ya le aviso al equipo de Redin para que te ayuden.",
+      suggested_recovery: "escalate_to_hr",
+    });
+  }
 
   let storagePath = input.storage_path?.trim() ?? "";
 
@@ -78,6 +205,8 @@ export async function uploadDocumento(
       return err(`storage upload failed: ${upErr.message}`, {
         code: "storage_error",
         retryable: true,
+        user_message_hint: "Hubo un problema recibiendo tu foto. ¿Me la reenvías, por favor?",
+        suggested_recovery: "retry_upload",
       });
     }
   }
@@ -95,6 +224,9 @@ export async function uploadDocumento(
     return err(`insert failed: ${insertErr.message}`, {
       code: "db_error",
       retryable: true,
+      user_message_hint:
+        "Uy, se me trabó el sistema guardando tu foto. Dame un momento y lo intento de nuevo.",
+      suggested_recovery: "retry_upload",
     });
   }
 
@@ -126,5 +258,14 @@ export async function uploadDocumento(
     });
   });
 
-  return ok({ documento_id: inserted.id, storage_path: storagePath });
+  const counts = await loadAckCounts(ctx, input.tecnico_id, input.tipo);
+  const ack = buildAck(input.tipo, counts);
+
+  return ok({
+    documento_id: inserted.id,
+    storage_path: storagePath,
+    document_type: input.tipo,
+    suggested_reply: ack.suggested_reply,
+    next_action: ack.next_action,
+  });
 }
