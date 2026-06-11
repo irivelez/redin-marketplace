@@ -1,7 +1,7 @@
 name: journey_9_1_registration
 prd_ref: "§9.1"
 category: journey
-description: "New técnico DMs Toño, registers with minimum fields (nombre, ciudad, especialidades, modalidad), then gets the 'qué viene ahora' trust bridge (3-step roadmap, 3 minutos, LLAMAR escape, data-policy link) BEFORE any cedula ask."
+description: "New técnico DMs Toño, registers with minimum fields (nombre, ciudad, especialidades, modalidad), then gets the 'qué viene ahora' trust bridge (3-step roadmap, 3 minutos, data-policy link — chat-only, no callback offer) BEFORE any cedula ask."
 db_fixtures:
   - tecnico_not_registered
   - open_ot_bogota_electrico
@@ -25,7 +25,8 @@ expected_tool_calls:
 expected_assertions:
   - response_does_not_contain_cedula: true
   - response_contains: "3 minutos"
-  - response_contains: "LLAMAR"
+  - response_does_not_contain: "LLAMAR"
+  - response_does_not_contain: "te llamamos"
   - response_contains: "politica-datos"
   - response_does_not_contain: "Ley 1581"
   - response_does_not_contain: "tratamiento de datos"

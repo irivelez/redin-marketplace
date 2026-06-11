@@ -146,10 +146,12 @@ async function main() {
     TONO_SYSTEM_PROMPT.includes("NO sigas con el screening hasta tener las dos")
   );
   check(
-    "trust bridge intact (LLAMAR/BORRAR/DATOS + roadmap)",
-    TONO_SYSTEM_PROMPT.includes("Palabras clave LLAMAR / BORRAR / DATOS") &&
-      TONO_SYSTEM_PROMPT.includes("human_callback_requested") &&
-      TONO_SYSTEM_PROMPT.includes("data_rights_request")
+    "trust bridge intact (BORRAR/DATOS + roadmap, chat-only — no LLAMAR)",
+    TONO_SYSTEM_PROMPT.includes("Palabras clave BORRAR / DATOS") &&
+      TONO_SYSTEM_PROMPT.includes("data_rights_request") &&
+      !TONO_SYSTEM_PROMPT.includes("LLAMAR") &&
+      !TONO_SYSTEM_PROMPT.includes("human_callback_requested") &&
+      !TONO_SYSTEM_PROMPT.includes("te llamamos")
   );
 
   console.log("\n--- C: transcription failure (sentinel + immediate fallback) ---");
