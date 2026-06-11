@@ -6,6 +6,8 @@
 
 1. **Added `@google/genai` to root `package.json` devDependencies** (via `npm install -D`). `qa/judge.ts` imports it dynamically; previously absent so every judge call threw on import. `npm run typecheck` green.
 
+1b. **Switched judge model from `gemini-2.5-pro` to `gemini-2.5-flash`** in `qa/judge.ts` (one-line change at the `models.generateContent` call). Per user instruction after the pro-tier quota-exhausted result.
+
 2. **Updated two base fixtures in `qa/fixtures.ts`** to model the post-approval state these journeys actually test:
    - `seedTecnicoRegisteredBogotaElectrico` — now sets `candidate_state="approved" + profile_complete=true + cedula=testCedulaFor(testPhone)`.
    - `seedTecnicoRegisteredCaliPlomero` — same shape.
@@ -18,26 +20,27 @@
 
 ### `npm run typecheck` → clean across all workspaces (post-dep + post-edit).
 
-### Judge smoke (item #2) → **FAILED — Gemini quota, NOT dep**
+### Judge smoke (item #2) → **FAILED — Gemini project-level access, NOT dep**
 
-`npm run eval -- --only journey_9_1_registration` (judge enabled).
+Two attempts after the dep was installed:
+
+**Attempt 1 — judge on `gemini-2.5-pro` (the original config):**
 - Deterministic: PASS (1/1).
-- Judge: **error** — Gemini reached, returned 429 RESOURCE_EXHAUSTED.
+- Judge: HTTP 429 RESOURCE_EXHAUSTED. Free-tier quota = 0 for `gemini-2.5-pro`.
 
-Exact error (quoted as instructed):
-```
-HTTP 429: Quota exceeded for metric:
-  generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-2.5-pro
-  generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-2.5-pro
-QuotaFailure: GenerateRequestsPerDayPerProjectPerModel-FreeTier (gemini-2.5-pro)
-              GenerateRequestsPerMinutePerProjectPerModel-FreeTier (gemini-2.5-pro)
-              GenerateContentInputTokensPerModelPerMinute-FreeTier (gemini-2.5-pro)
-              GenerateContentInputTokensPerModelPerDay-FreeTier (gemini-2.5-pro)
-```
+**Attempt 2 — judge switched to `gemini-2.5-flash` per user instruction:**
+- Deterministic: PASS (1/1).
+- Judge: HTTP 403 PERMISSION_DENIED — `"Your project has been denied access. Please contact support."`
 
-**Root cause:** `qa/judge.ts` uses `gemini-2.5-pro`, which has free-tier quota = 0. Production doc classification at `tools/src/classify-documento.ts:28` uses `gemini-2.5-flash` (free-tier quota > 0), which is why prod works daily with the same `GEMINI_API_KEY`. Per the instruction "do not debug Gemini infra beyond the dependency," I stopped here on the judge path.
+So the `GEMINI_API_KEY` in `.env.local` works for the production document-classification path (which also calls `gemini-2.5-flash` per `tools/src/classify-documento.ts:28`), but the same key, against the same model, from this worktree, is rejected with 403 PERMISSION_DENIED. Likely causes (un-investigated, all out of scope for this session per "do not debug Gemini infra beyond the dep"):
+- Local `.env.local` key is stale / different from the prod env-set key, OR
+- The Google Cloud / AI Studio project tied to this key has been region-restricted or revoked, OR
+- Per-key application restrictions deny direct REST calls (only Vertex-mediated ones are allowed).
 
-**To unblock the judge:** either (a) enable paid tier on the Google AI Studio project, or (b) switch the judge to `gemini-2.5-flash` / `gemini-2.5-flash-thinking`. Both are out of this session's scope; the user should pick.
+**To unblock the judge — pick one:**
+1. Confirm `.env.local` `GEMINI_API_KEY` matches the prod Railway env, then re-run.
+2. Mint a fresh AI Studio key with no project restrictions, drop into `.env.local`, re-run.
+3. Switch the judge to Vertex AI client + service-account auth (largest change).
 
 ### Full eval (item #4) → ran, see `qa/reports/EVAL-2026-06-11-1404.md`
 
@@ -80,6 +83,7 @@ The prod incident with `+120363424571968232` (a group's own JID being treated as
 ## Files touched
 
 - `package.json` + `package-lock.json` — root: added `@google/genai` devDependency.
+- `qa/judge.ts` — judge model: `gemini-2.5-pro` → `gemini-2.5-flash`.
 - `qa/fixtures.ts` — two fixture functions updated to set approved state.
 - `qa/seeds/journeys/journey_9_2_demand_broadcast.yaml` — description.
 - `qa/seeds/journeys/journey_9_3_pull_apply.yaml` — description.
@@ -93,6 +97,6 @@ The prod incident with `+120363424571968232` (a group's own JID being treated as
 
 ## What still needs to happen for a real judge baseline
 
-1. Decide judge model: stay on `gemini-2.5-pro` and pay, or switch the judge to `gemini-2.5-flash` and re-run.
-2. Relax or split the `tool.must_be_first: identify_user` assertion in `qa/deterministic.ts` so returning-worker seeds aren't penalized for correct agent behavior.
+1. **Fix Gemini access for the `GEMINI_API_KEY` in local `.env.local`** — the model switch to `gemini-2.5-flash` was made this session, but the project-level 403 PERMISSION_DENIED is unresolved. Most likely: sync `.env.local` to the prod Railway key, OR mint a fresh AI Studio key without project restrictions. Try `--only journey_9_1_registration` after either fix; expected: a real F=N P=N E=N verdict from Gemini.
+2. **Relax or split the `tool.must_be_first: identify_user` assertion in `qa/deterministic.ts`** so returning-worker seeds aren't penalized for correct agent behavior (identity gate pre-resolves `tecnico_id` for known phones → LLM correctly skips `identify_user` in returning mode). 16+ seeds are blocked on this; full list in the "newly-uncovered problem" section above.
 3. Re-run `npm run eval`. That run will be the first real judge baseline.
