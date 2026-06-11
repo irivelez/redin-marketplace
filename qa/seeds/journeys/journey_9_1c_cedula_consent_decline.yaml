@@ -1,0 +1,33 @@
+name: journey_9_1c_cedula_consent_decline
+prd_ref: "§9.1"
+category: journey
+description: "New técnico registers but declines the cedula consent twice — Toño explains once in plain Spanish, then marks the candidate withdrawn (no_cedula_provided) and closes the door warmly. find_by_cedula is never called."
+db_fixtures:
+  - tecnico_not_registered
+
+user_utterances:
+  - "hola, quiero trabajar"
+  - "soy Pedro Pérez, estoy en Ibagué, hago pintura"
+  - "mi número de contacto es 3109876543"
+  - "no, mi cédula no la doy"
+  - "no hermano, así no. no la voy a dar"
+
+expected_tool_calls:
+  - tool: identify_user
+    must_be_first: true
+  - tool: register_tecnico
+    args_contain:
+      nombre: "Pedro"
+      ciudad: "Ibagué"
+  - tool: mark_candidate_withdrawn
+    args_contain:
+      reason: "no_cedula_provided"
+  - tool: find_by_cedula
+    must_NOT_be_called: true
+
+expected_assertions:
+  - response_does_not_contain_cedula: true
+  - response_contains: "escríbenos"
+  - response_does_not_contain: "Ley 1581"
+  - response_does_not_contain: "consentimiento"
+  - response_does_not_contain: "titular"

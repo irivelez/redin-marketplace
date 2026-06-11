@@ -1,7 +1,7 @@
 name: journey_9_1_registration
 prd_ref: "§9.1"
 category: journey
-description: "New técnico DMs Toño, registers with minimum fields (nombre, ciudad, especialidades, modalidad), gets greeted with matching OTs immediately after."
+description: "New técnico DMs Toño, registers with minimum fields (nombre, ciudad, especialidades, modalidad), then gets the 'qué viene ahora' trust bridge (3-step roadmap, 3 minutos, LLAMAR escape, data-policy link) BEFORE any cedula ask."
 db_fixtures:
   - tecnico_not_registered
   - open_ot_bogota_electrico
@@ -10,7 +10,7 @@ user_utterances:
   - "hola, quiero trabajar con redin"
   - "soy Juan Rodríguez, vivo en Bogotá, soy eléctrico"
   - "trabajo solo"
-  - "prestación de servicios está bien"
+  - "mi número de contacto es 3001234567"
 
 expected_tool_calls:
   - tool: identify_user
@@ -19,10 +19,14 @@ expected_tool_calls:
     args_contain:
       nombre: "Juan"
       ciudad: "Bogotá"
-      especialidades: ["eléctrico"]
-  - tool: read_pending_ots
+  - tool: find_by_cedula
+    must_NOT_be_called: true
 
 expected_assertions:
   - response_does_not_contain_cedula: true
-  - response_contains: "Bogotá"
-  - response_does_not_contain: "¿excelente"
+  - response_contains: "3 minutos"
+  - response_contains: "LLAMAR"
+  - response_contains: "politica-datos"
+  - response_does_not_contain: "Ley 1581"
+  - response_does_not_contain: "tratamiento de datos"
+  - response_does_not_contain: "¡excelente"

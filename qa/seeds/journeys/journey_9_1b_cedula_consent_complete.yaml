@@ -1,0 +1,34 @@
+name: journey_9_1b_cedula_consent_complete
+prd_ref: "§9.1"
+category: journey
+description: "New técnico registers, gets the trust bridge, consents to the cedula ask ('¿me autorizas?'), gives the number — Toño calls find_by_cedula and moves to the photos ask with the talento-humano review line. Consent asked once, link sent once, zero legalese."
+db_fixtures:
+  - tecnico_not_registered
+
+user_utterances:
+  - "hola, quiero trabajar con redin"
+  - "soy Carlos Mendoza, estoy en Neiva, hago plomería"
+  - "mi número de contacto es 3017654321"
+  - "listo, sigamos"
+  - "sí, te autorizo. mi cédula es 1098765432"
+
+expected_tool_calls:
+  - tool: identify_user
+    must_be_first: true
+  - tool: register_tecnico
+    args_contain:
+      nombre: "Carlos"
+      ciudad: "Neiva"
+  - tool: find_by_cedula
+    args_contain:
+      cedula: "1098765432"
+  - tool: mark_candidate_withdrawn
+    must_NOT_be_called: true
+
+expected_assertions:
+  - response_does_not_contain_cedula: true
+  - response_contains: "fotos"
+  - response_does_not_contain: "Ley 1581"
+  - response_does_not_contain: "tratamiento de datos"
+  - response_does_not_contain: "consentimiento"
+  - response_does_not_contain: "satisfactoriamente"
