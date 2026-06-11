@@ -6,3 +6,4 @@ export * from "./supabase";
 export * from "./ids";
 export * from "./matching-signals";
 export * from "./rank-tecnicos-for-ot";
+export * from "./voice";

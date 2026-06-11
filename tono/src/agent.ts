@@ -79,6 +79,19 @@ export interface HandleMessageInput {
    * the LLM knows a photo was attempted and must NOT claim it arrived.
    */
   media_failures?: InboundMediaFailure[];
+  /**
+   * Voice-note transcripts (Groq Whisper port from Manos, 2026-06-11).
+   * Each one is injected as a [VOZ transcrita] context line wrapped in
+   * <data source="tecnico_voice_transcript"> — same prompt-injection defense
+   * as typed text. The prompt instructs the model to treat transcripts as
+   * the worker's own words EXCEPT for the cédula number, which must be typed.
+   */
+  voice_transcripts?: string[];
+}
+
+// Exported for scripts/smoke-voice-input.ts — locks the wrap format.
+export function formatVoiceTranscriptLine(transcript: string): string {
+  return `[VOZ transcrita — nota de voz del técnico]: ${wrapData(transcript, "tecnico_voice_transcript")}`;
 }
 
 export interface HandleMessageResult {
@@ -676,6 +689,9 @@ export async function handleMessage(
   }
   for (const f of input.media_failures ?? []) {
     contextLines.push(`[MEDIA_FAILED: kind=${f.kind} reason=${f.reason}]`);
+  }
+  for (const t of input.voice_transcripts ?? []) {
+    contextLines.push(formatVoiceTranscriptLine(t));
   }
   const userMessage = `${contextLines.join("\n")}\n${wrapData(text, "tecnico")}`;
 

@@ -1,0 +1,27 @@
+name: journey_voice_skills
+prd_ref: "§9.1 voice-input"
+category: journey
+description: "Worker sends skills/experience as a voice note (pre-transcribed — the runner injects the transcript the way agent.ts marks it). Toño treats the transcript as the worker's own words: registers him with the spoken ciudad and moves the screening forward, no refusal, no escalation."
+db_fixtures:
+  - tecnico_not_registered
+
+user_utterances:
+  - "hola, quiero trabajar con redin"
+  - "[VOZ transcrita — nota de voz del técnico]: soy Pedro Rojas, estoy en Bogotá, soy electricista con 10 años de experiencia, trabajé con Codensa"
+  - "mi número de contacto es 3019876543"
+
+expected_tool_calls:
+  - tool: identify_user
+    must_be_first: true
+  - tool: register_tecnico
+    args_contain:
+      ciudad: "Bogotá"
+  - tool: escalate_to_hr
+    must_NOT_be_called: true
+  - tool: mark_candidate_withdrawn
+    must_NOT_be_called: true
+
+expected_assertions:
+  - response_does_not_contain_cedula: true
+  - response_does_not_contain: "no pude transcribir"
+  - response_does_not_contain: "no entiendo"

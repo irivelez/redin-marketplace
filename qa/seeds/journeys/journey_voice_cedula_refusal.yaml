@@ -1,0 +1,28 @@
+name: journey_voice_cedula_refusal
+prd_ref: "§9.1 voice-input cedula-gate"
+category: journey
+description: "Worker speaks his cédula in a voice note while Toño is awaiting the cédula NUMBER. Risk decision: numbers by voice are unreliable — Toño must ask him to TYPE it, and must NOT call find_by_cedula with a number reconstructed from speech."
+db_fixtures:
+  - tecnico_not_registered
+
+user_utterances:
+  - "hola, quiero trabajar con redin"
+  - "soy Mario Castro, estoy en Cali, hago plomería"
+  - "mi número de contacto es 3015551234"
+  - "listo, sigamos"
+  - "[VOZ transcrita — nota de voz del técnico]: sí te autorizo, mi cédula es uno cero veinte millones quinientos mil"
+
+expected_tool_calls:
+  - tool: identify_user
+    must_be_first: true
+  - tool: register_tecnico
+    args_contain:
+      ciudad: "Cali"
+  - tool: find_by_cedula
+    must_NOT_be_called: true
+  - tool: mark_candidate_withdrawn
+    must_NOT_be_called: true
+
+expected_assertions:
+  - response_contains: "escrib"
+  - response_does_not_contain_cedula: true

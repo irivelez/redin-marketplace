@@ -16,7 +16,12 @@ import makeWASocket, {
   type WAMessage,
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
-import { createLogger, phoneFromJid } from "@redin/shared";
+import {
+  createLogger,
+  phoneFromJid,
+  transcribeAudio,
+  type TranscribeResult,
+} from "@redin/shared";
 import { INPUT_CAPS } from "@redin/tools/schemas";
 import { randomUUID } from "node:crypto";
 import pino from "pino";
@@ -43,12 +48,14 @@ export interface InboundMedia {
 }
 
 // A media item the worker sent that we could NOT ingest (download from WA
-// failed, or the Storage upload failed). Surfaced to the agent so the LLM
-// turn knows a photo was attempted — the delivery layer has ALREADY sent the
-// user-facing "reenvíamela" fallback by the time this reaches the handler.
+// failed, the Storage upload failed, or — for voice notes — Groq Whisper
+// could not produce a transcript). Surfaced to the agent so the LLM turn
+// knows a photo/voice note was attempted — the delivery layer has ALREADY
+// sent the user-facing "reenvíamela" fallback by the time this reaches the
+// handler.
 export interface InboundMediaFailure {
-  kind: "image" | "document";
-  reason: "download" | "storage";
+  kind: "image" | "document" | "voice";
+  reason: "download" | "storage" | "transcription";
 }
 
 type MediaResult = InboundMedia | { failed: true; reason: "download" | "storage" };
@@ -60,6 +67,10 @@ export interface WhatsAppHandlers {
     jid: string;
     media?: InboundMedia[];
     media_failures?: InboundMediaFailure[];
+    // Voice-note transcripts (Groq Whisper port from Manos, 2026-06-11).
+    // agent.ts wraps each one in <data source="tecnico_voice_transcript">
+    // before it reaches the LLM — same injection defense as typed text.
+    voice_transcripts?: string[];
   }) => Promise<void>;
   onReady?: () => void | Promise<void>;
 }
@@ -78,6 +89,7 @@ interface PendingBatch {
   texts: string[];
   medias: InboundMedia[];
   mediaFailures: InboundMediaFailure[];
+  voiceTranscripts: string[];
   idleTimer: NodeJS.Timeout;
   maxAgeTimer: NodeJS.Timeout;
   firstAt: number;
@@ -101,6 +113,21 @@ export interface WhatsAppOptions {
   supabase: SupabaseClient;
   // If true, print QR to stdout. False in prod (we pair once, creds persist).
   printQr?: boolean;
+  // TEST SEAMS (scripts/smoke-voice-input.ts) — production leaves both unset:
+  // transcriber defaults to shared transcribeAudio (Groq Whisper),
+  // audioDownloader defaults to Baileys downloadMediaMessage.
+  transcriber?: (
+    bytes: Buffer,
+    filename?: string
+  ) => Promise<TranscribeResult | null>;
+  audioDownloader?: (msg: WAMessage) => Promise<Buffer>;
+}
+
+// Voice input flag — direct rollout, "off" is the instant revert switch
+// (restores pre-port behavior: audio messages silently ignored).
+function voiceInputEnabled(): boolean {
+  const v = (process.env.TONO_VOICE_INPUT ?? "").toLowerCase();
+  return !(v === "0" || v === "false" || v === "no" || v === "off");
 }
 
 export class WhatsAppClient {
@@ -359,6 +386,35 @@ export class WhatsAppClient {
       return;
     }
 
+    // ---- Audio message (voice note or regular audio): transcribe ----
+    // Groq Whisper port from Manos (2026-06-11). Transcript travels as a
+    // separate batch field (NOT as text) so agent.ts can wrap it in
+    // <data source="tecnico_voice_transcript">. Voice is exempt from the S12
+    // recentTextByPhone dedup by construction — this branch never touches it.
+    if (msgContent.audioMessage) {
+      if (!voiceInputEnabled()) {
+        log.info("voice note ignored (TONO_VOICE_INPUT off)", { phone, msgId });
+        return;
+      }
+      log.info("inbound", {
+        phone,
+        msgId,
+        text_preview: "[nota de voz]",
+        dedup_decision: "media_exempt",
+      });
+      const outcome = await this.transcribeVoiceNote(msg, phone);
+      if ("failed" in outcome) {
+        await this.notifyMediaFailure(jid, "voice");
+        this.enqueue(phone, jid, "[nota de voz]", null, {
+          kind: "voice",
+          reason: outcome.reason,
+        });
+        return;
+      }
+      this.enqueue(phone, jid, "[nota de voz]", null, undefined, outcome.text);
+      return;
+    }
+
     // ---- Text message (default) ----
     const text =
       msgContent.conversation ??
@@ -411,7 +467,8 @@ export class WhatsAppClient {
     jid: string,
     text: string,
     media: InboundMedia | null,
-    mediaFailure?: InboundMediaFailure
+    mediaFailure?: InboundMediaFailure,
+    voiceTranscript?: string
   ): void {
     let entry = this.pending.get(phone);
     if (!entry) {
@@ -423,6 +480,7 @@ export class WhatsAppClient {
         texts: [],
         medias: [],
         mediaFailures: [],
+        voiceTranscripts: [],
         idleTimer,
         maxAgeTimer,
         firstAt: now,
@@ -435,6 +493,7 @@ export class WhatsAppClient {
     if (text.length > 0) entry.texts.push(text);
     if (media) entry.medias.push(media);
     if (mediaFailure) entry.mediaFailures.push(mediaFailure);
+    if (voiceTranscript) entry.voiceTranscripts.push(voiceTranscript);
   }
 
   // Drain the per-phone batch into a single onMessage call. MUST clear
@@ -452,7 +511,8 @@ export class WhatsAppClient {
     if (
       entry.texts.length === 0 &&
       entry.medias.length === 0 &&
-      entry.mediaFailures.length === 0
+      entry.mediaFailures.length === 0 &&
+      entry.voiceTranscripts.length === 0
     ) {
       return;
     }
@@ -465,6 +525,8 @@ export class WhatsAppClient {
         media: entry.medias.length > 0 ? entry.medias : undefined,
         media_failures:
           entry.mediaFailures.length > 0 ? entry.mediaFailures : undefined,
+        voice_transcripts:
+          entry.voiceTranscripts.length > 0 ? entry.voiceTranscripts : undefined,
       })
       .catch((e) => {
         log.error("batched onMessage failed", {
@@ -485,11 +547,16 @@ export class WhatsAppClient {
   // Deliberately does NOT wait for the LLM turn: the worker must hear "resend
   // it" within seconds, not after a 10-20s agent round-trip (May25-Carlos
   // re-send regression).
-  private async notifyMediaFailure(jid: string, kind: "image" | "document"): Promise<void> {
+  private async notifyMediaFailure(
+    jid: string,
+    kind: "image" | "document" | "voice"
+  ): Promise<void> {
     const body =
       kind === "image"
         ? "Hubo un problema recibiendo la última foto, ¿me la puedes reenviar por favor?"
-        : "Hubo un problema recibiendo el último archivo, ¿me lo puedes reenviar por favor?";
+        : kind === "document"
+          ? "Hubo un problema recibiendo el último archivo, ¿me lo puedes reenviar por favor?"
+          : "Hubo un problema con la nota de voz, ¿me la puedes mandar de nuevo o escribirla por acá?";
     try {
       await this.sendText(jid, body);
     } catch (e) {
@@ -566,6 +633,60 @@ export class WhatsAppClient {
         error: e instanceof Error ? e.message : String(e),
       });
       return { failed: true, reason: "storage" };
+    }
+  }
+
+  // Mirrors manos/src/whatsapp.ts handleAudioMessage, adapted to Toño's
+  // batch + media-failure shape. Audio bytes are transcribed in-memory and
+  // never stored (no PII at rest beyond the transcript in the session log).
+  private async transcribeVoiceNote(
+    msg: WAMessage,
+    phone: string
+  ): Promise<{ text: string } | { failed: true; reason: "download" | "transcription" }> {
+    let buffer: Buffer;
+    try {
+      if (this.opts.audioDownloader) {
+        buffer = await this.opts.audioDownloader(msg);
+      } else {
+        if (!this.sock) {
+          log.warn("transcribeVoiceNote: socket not ready", { phone });
+          return { failed: true, reason: "download" };
+        }
+        buffer = (await downloadMediaMessage(msg, "buffer", {}, {
+          logger: pino({ level: "silent" }) as unknown as pino.Logger,
+          reuploadRequest: this.sock.updateMediaMessage,
+        })) as Buffer;
+      }
+    } catch (e) {
+      log.error("voice note download threw", {
+        phone,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return { failed: true, reason: "download" };
+    }
+    try {
+      const transcribe = this.opts.transcriber ?? transcribeAudio;
+      const result = await transcribe(buffer, "audio.ogg");
+      if (!result || result.text.trim().length === 0) {
+        return { failed: true, reason: "transcription" };
+      }
+      let text = result.text;
+      if (text.length > INPUT_CAPS.whatsapp) {
+        log.warn("voice transcript truncated", {
+          phone,
+          original_len: text.length,
+          cap: INPUT_CAPS.whatsapp,
+        });
+        text = text.slice(0, INPUT_CAPS.whatsapp);
+      }
+      log.info("voice note transcribed", { phone, text_len: text.length });
+      return { text };
+    } catch (e) {
+      log.error("voice transcription threw", {
+        phone,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      return { failed: true, reason: "transcription" };
     }
   }
 }
