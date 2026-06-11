@@ -20,35 +20,32 @@
 
 ### `npm run typecheck` → clean across all workspaces (post-dep + post-edit).
 
-### Judge smoke (item #2) → **FAILED — Gemini project-level access, NOT dep**
+### Judge smoke (item #2) → **PASS after key rotation**
 
-Two attempts after the dep was installed:
+Three attempts:
 
-**Attempt 1 — judge on `gemini-2.5-pro` (the original config):**
-- Deterministic: PASS (1/1).
-- Judge: HTTP 429 RESOURCE_EXHAUSTED. Free-tier quota = 0 for `gemini-2.5-pro`.
+1. `gemini-2.5-pro` + original `.env.local` key → HTTP 429 RESOURCE_EXHAUSTED (free-tier quota = 0).
+2. `gemini-2.5-flash` + original `.env.local` key → HTTP 403 PERMISSION_DENIED (project-level denial).
+3. `gemini-2.5-flash` + fresh `GEMINI_API_KEY` provided by user → **judge works.**
 
-**Attempt 2 — judge switched to `gemini-2.5-flash` per user instruction:**
-- Deterministic: PASS (1/1).
-- Judge: HTTP 403 PERMISSION_DENIED — `"Your project has been denied access. Please contact support."`
+The stale `.env.local` key was the root cause of the 403 (most likely revoked / project-restricted). The fresh key on `gemini-2.5-flash` resolves cleanly.
 
-So the `GEMINI_API_KEY` in `.env.local` works for the production document-classification path (which also calls `gemini-2.5-flash` per `tools/src/classify-documento.ts:28`), but the same key, against the same model, from this worktree, is rejected with 403 PERMISSION_DENIED. Likely causes (un-investigated, all out of scope for this session per "do not debug Gemini infra beyond the dep"):
-- Local `.env.local` key is stale / different from the prod env-set key, OR
-- The Google Cloud / AI Studio project tied to this key has been region-restricted or revoked, OR
-- Per-key application restrictions deny direct REST calls (only Vertex-mediated ones are allowed).
+Smoke verdict: `journey_9_1b_cedula_consent_complete` → Deterministic PASS + Judge PASS (F=10 P=10 E=10).
 
-**To unblock the judge — pick one:**
-1. Confirm `.env.local` `GEMINI_API_KEY` matches the prod Railway env, then re-run.
-2. Mint a fresh AI Studio key with no project restrictions, drop into `.env.local`, re-run.
-3. Switch the judge to Vertex AI client + service-account auth (largest change).
+### Full eval (item #4) → first real judge baseline produced
 
-### Full eval (item #4) → ran, see `qa/reports/EVAL-2026-06-11-1404.md`
+`qa/reports/EVAL-2026-06-11-1630.md` — the run after the key rotation.
 
-- Deterministic: 9/32 pass, 23 fail.
-- Judge: 0/0 (every call errored on the same quota).
-- Coverage gate: BLOCKED.
+- **Deterministic: 10/32 pass, 22 fail.** (Up by 1 from the 1404 run — LLM non-determinism on a borderline seed.)
+- **Judge: 9/9 pass (100%).** Every seed that reached the judge layer scored F=10 P=10 E=10. The 9 that judged: `journey_9_1b`, `journey_9_1c`, `journey_9_5`, `journey_voice_skills`, `journey_voice_cedula_refusal`, `redteam_02_wrong_tool_order`, `redteam_04_injection_via_nombre`, `redteam_07_over_escalation`, `test_e_legacy_enrichment`.
+- Coverage: journeys 5/11, refusals 0/6, redteam 3/10, onboarding 1/5. Gate: BLOCKED on coverage (not on judge).
 
-**Headline:** fixture fix worked structurally (identity gate now logs `candidate_state=approved is_legacy_incomplete=false` for the affected seeds; `read_pending_ots` and `create_postulacion` are no longer refused), **but** it exposed a second-order problem the original diagnosis didn't anticipate — see next section.
+**This is the honest first judge baseline.** Two important caveats:
+
+1. **Partial baseline** — only the 9 seeds that pass deterministic could be graded. The 23 deterministic failures (mostly the `must_be_first: identify_user` regression) prevent the other 23 from being judged. So the 100% judge pass-rate is real but covers ⅓ of the suite.
+2. **Calibration warning.** The perfect 10/10/10 across all 9 seeds is suspiciously clean — worth a sanity check next session by deliberately breaking one seed (e.g. inject a fabricated tarifa or PII echo) and confirming the judge actually marks it down. Don't trust 100% until the rubric has been stressed.
+
+Fixture fix worked structurally (identity gate now logs `candidate_state=approved is_legacy_incomplete=false` for the affected seeds; `read_pending_ots` and `create_postulacion` are no longer refused), **but** it exposed a second-order problem the original diagnosis didn't anticipate — see next section.
 
 ## The newly-uncovered problem (scope-stopped per budget rule)
 
@@ -95,8 +92,10 @@ The prod incident with `+120363424571968232` (a group's own JID being treated as
 - `qa/reports/EVAL-2026-06-11-1336.md` — single-seed judge smoke output.
 - `qa/reports/EVAL-2026-06-11-1404.md` — full eval output (the "first real judge run" was not produceable due to quota).
 
-## What still needs to happen for a real judge baseline
+## What still needs to happen
 
-1. **Fix Gemini access for the `GEMINI_API_KEY` in local `.env.local`** — the model switch to `gemini-2.5-flash` was made this session, but the project-level 403 PERMISSION_DENIED is unresolved. Most likely: sync `.env.local` to the prod Railway key, OR mint a fresh AI Studio key without project restrictions. Try `--only journey_9_1_registration` after either fix; expected: a real F=N P=N E=N verdict from Gemini.
-2. **Relax or split the `tool.must_be_first: identify_user` assertion in `qa/deterministic.ts`** so returning-worker seeds aren't penalized for correct agent behavior (identity gate pre-resolves `tecnico_id` for known phones → LLM correctly skips `identify_user` in returning mode). 16+ seeds are blocked on this; full list in the "newly-uncovered problem" section above.
-3. Re-run `npm run eval`. That run will be the first real judge baseline.
+The judge baseline now exists (9/9 100%). Two follow-ups for full-suite coverage:
+
+1. **Relax or split the `tool.must_be_first: identify_user` assertion in `qa/deterministic.ts`** so returning-worker seeds aren't penalized for correct agent behavior (identity gate pre-resolves `tecnico_id` for known phones → LLM correctly skips `identify_user` in returning mode). 16+ seeds are blocked on this; full list in the "newly-uncovered problem" section above. After fix, expect ~25–30/32 to reach the judge layer.
+2. **Calibration sanity-check.** Inject one deliberate failure (fabricated tarifa or PII echo) into a passing seed and confirm the judge marks it down. Without this, the 100% pass-rate on `gemini-2.5-flash` is suspicious — flash may be too lenient versus the original `gemini-2.5-pro` rubric.
+3. Re-run `npm run eval`. That run will be the full first judge baseline (post both fixes).
