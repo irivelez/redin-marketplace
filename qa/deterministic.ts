@@ -26,8 +26,29 @@
  */
 
 import type { ServerClient } from "@redin/shared";
-import type { Seed } from "./seeds/schema.js";
+import type { DBFixture, Seed } from "./seeds/schema.js";
 import type { InjectResult } from "./inject.js";
+
+// Fixtures that pre-create an approved técnico whose row.phone === testPhone.
+// For these seeds the identity gate (tono/src/agent.ts) pre-resolves
+// session.tecnico_id BEFORE the first LLM turn, the agent enters
+// routingMode="returning"/"enrichment", and identify_user is correctly skipped
+// because identity is already known — see router.ts:240-254 Rule 1b. The
+// "sister phone" fixtures (legacy_incomplete_sister_phone, screening/
+// withdrawn/pending_with_cedula) seed onto a DIFFERENT phone, so testPhone is
+// fresh and identify_user is still required.
+const PRE_IDENTIFIED_FIXTURES: ReadonlySet<DBFixture> = new Set<DBFixture>([
+  "tecnico_registered_bogota_electrico",
+  "tecnico_registered_cali_plomero",
+  "tecnico_with_pending_postulacion",
+  "tecnico_with_signed_contract",
+  "tecnico_legacy_approved_incomplete",
+  "tecnico_legacy_approved_complete",
+]);
+
+function sessionStartsIdentified(seed: Seed): boolean {
+  return seed.db_fixtures.some((f) => PRE_IDENTIFIED_FIXTURES.has(f));
+}
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -119,7 +140,15 @@ function checkToolSequence(
   const calls = allToolCalls(turns);
   const callNames = calls.map((c) => c.name);
 
-  for (const assertion of seed.expected_tool_calls) {
+  // Drop stale `identify_user must_be_first` for pre-identified sessions —
+  // see PRE_IDENTIFIED_FIXTURES comment at top of file.
+  const effectiveAssertions = sessionStartsIdentified(seed)
+    ? seed.expected_tool_calls.filter(
+        (a) => !(a.tool === "identify_user" && a.must_be_first === true)
+      )
+    : seed.expected_tool_calls;
+
+  for (const assertion of effectiveAssertions) {
     // must_NOT_be_called
     if (assertion.must_NOT_be_called === true) {
       if (callNames.includes(assertion.tool)) {
