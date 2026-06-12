@@ -456,9 +456,10 @@ async function main(): Promise<void> {
           turns,
           testPhone,
           conversationStart,
-          createServerClient()
+          createServerClient(),
+          runCedula
         )
-      : deterministicCheck(liveSeed, turns);
+      : deterministicCheck(liveSeed, turns, runCedula);
     console.log(
       `  [det] ${detResult.passed ? "PASS" : `FAIL (${detResult.failures.length} failure(s))`}`
     );
