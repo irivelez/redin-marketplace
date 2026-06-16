@@ -4,6 +4,7 @@ export * from "./env";
 export * from "./logger";
 export * from "./supabase";
 export * from "./ids";
+export * from "./ot-public-token";
 export * from "./matching-signals";
 export * from "./rank-tecnicos-for-ot";
 export * from "./voice";

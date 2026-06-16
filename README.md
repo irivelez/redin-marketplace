@@ -118,7 +118,12 @@ All credentials live in `marketplace/.env.local` (gitignored). Required:
 
 ## Hard constraints
 
-- **Zero writes to AppSheet.** Read-only. Enforced by `AppSheetReadClient` having no `edit`/`add`.
+- **Tightly-scoped AppSheet writes only.** On `Ordenes_Trabajo` the sole write is the alcance
+  writeback (`sync` → `editOT`), which sets **only the `Alcance_OT` column** — it never writes
+  `ID_Orden`, `Numero_Orden` (the consecutive), or any other field, and never Adds or Deletes OT
+  rows. The other intentional write is the **TECNICOS reverse-projection** (`addTecnico` to add an
+  approved worker to Jose's roster; `editTecnico` to soft-revoke via `Estado_Redin`). Nothing
+  writes to `Clientes`, `Arquitecto`, or `Costos_Ejecucion`.
 - **Secrets only in `.env.local`.** Never in code, never committed.
 - **Multi-session**: per-phone async mutex ensures concurrent WA conversations don't interleave state.
 - **TypeScript strict + `noUncheckedIndexedAccess`** across every workspace.

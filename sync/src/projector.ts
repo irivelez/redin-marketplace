@@ -19,22 +19,16 @@
 //   - At attempt 3, sends a louder Telegram ping; the dashboard's per-worker
 //     warning banner surfaces appsheet_sync_last_error in the operator's UI.
 
-import { createLogger } from "@redin/shared";
+import { createLogger, signOtPublicToken } from "@redin/shared";
 import type { ServerClient } from "@redin/shared";
 import type { AppSheetReadClient } from "./appsheet";
 import type { TelegramSink } from "./telegram";
-// Inline alcance shape to avoid circular dep with @redin/tools.
-interface AlcanceShape {
-  especialidad: string;
-  subcategoria?: string;
-  cantidades?: string[];
-  conditions?: string[];
-  schedule_notes?: string;
-  value_estimate?: string;
-  summary: string;
-}
 
 const log = createLogger("sync:projector");
+
+const ALCANCE_LINK_BASE_URL =
+  process.env.DASHBOARD_URL ??
+  "https://dashboard-mp-production-1ef3.up.railway.app";
 
 const inFlight = new Set<string>();
 
@@ -86,18 +80,20 @@ export interface OtAlcanceProjectorResult {
 const OT_ALCANCE_ATTEMPTS_LIMIT = 5;
 
 /**
- * Drain up to 5 ots_extended rows where appsheet_alcance_pending=true.
- * Writes Alcance_OT to AppSheet; no-ops safely if the column doesn't exist
- * yet (Estado_Redin precedent).
+ * Drain up to 5 ots_extended rows where appsheet_alcance_pending=true and write
+ * the alcance (scope) into the AppSheet `Alcance_OT` column so HR/Jose see it on
+ * the OT. No-ops safely if the column doesn't exist yet (Estado_Redin precedent).
+ *
+ * SAFETY: the ONLY OT field we ever write is `Alcance_OT`. We never write
+ * ID_Orden, Numero_Orden (the consecutive), or any other column, and we never
+ * Add or Delete OT rows.
  */
 export async function tickOtAlcanceOutbox(
   deps: ProjectorTickDeps
 ): Promise<OtAlcanceProjectorResult[]> {
   const { data: pendingRows, error } = await deps.supa
     .from("ots_extended")
-    .select(
-      "ot_row_id, alcance_jsonb, alcance_pdf_path, appsheet_alcance_sync_attempts"
-    )
+    .select("ot_row_id, appsheet_alcance_sync_attempts")
     .eq("appsheet_alcance_pending", true)
     .lt("appsheet_alcance_sync_attempts", OT_ALCANCE_ATTEMPTS_LIMIT)
     .limit(5);
@@ -113,7 +109,33 @@ export async function tickOtAlcanceOutbox(
     const otRowId = row.ot_row_id as string;
     const currentAttempts = (row.appsheet_alcance_sync_attempts as number) ?? 0;
 
-    // Bump attempts first (CAS-style claim).
+    // Resolve the AppSheet row key (ID_Orden) BEFORE claiming an attempt.
+    // ID_Orden is the table's key; AppSheet assigns it shortly after a row is
+    // created. If the mirror doesn't carry it yet, skip WITHOUT burning an
+    // attempt so the row simply retries on a later tick (once the next mirror
+    // refresh brings ID_Orden) instead of dead-lettering while merely waiting.
+    // NEVER fall back to Numero_Orden as the key — doing so produced weeks of
+    // AppSheet 400 "Row key field 'ID_Orden' value is missing" dead-letters.
+    const { data: otMirrow } = await deps.supa
+      .from("ots_mirror")
+      .select("data")
+      .eq("row_id", otRowId)
+      .maybeSingle();
+    const otData = otMirrow?.data as Record<string, unknown> | null;
+    const rawIdOrden = otData?.["ID_Orden"];
+    const idOrden =
+      typeof rawIdOrden === "string" && rawIdOrden.trim() ? rawIdOrden.trim() : null;
+
+    if (!idOrden) {
+      const errMsg = "waiting_for_appsheet_id_orden";
+      await deps.supa
+        .from("ots_extended")
+        .update({ appsheet_alcance_last_error: errMsg })
+        .eq("ot_row_id", otRowId);
+      results.push({ ot_row_id: otRowId, action: "skipped", attempts: currentAttempts, error: errMsg });
+      continue;
+    }
+
     const { data: claimed } = await deps.supa
       .from("ots_extended")
       .update({ appsheet_alcance_sync_attempts: currentAttempts + 1 })
@@ -128,21 +150,9 @@ export async function tickOtAlcanceOutbox(
 
     const claimedAttempts = currentAttempts + 1;
 
-    // Load OT natural key from ots_mirror.
-    const { data: otMirrow } = await deps.supa
-      .from("ots_mirror")
-      .select("data")
-      .eq("row_id", otRowId)
-      .maybeSingle();
-
-    const otData = otMirrow?.data as Record<string, unknown> | null;
-    const idOrden =
-      (typeof otData?.["ID_Orden"] === "string" ? otData["ID_Orden"] : null) ??
-      (typeof otData?.["Numero_Orden"] === "string" ? otData["Numero_Orden"] : null) ??
-      (typeof otData?.["ID Orden"] === "string" ? otData["ID Orden"] : null);
-
-    if (!idOrden) {
-      const errMsg = "no_id_orden_in_ots_mirror";
+    const alcanceUrl = buildAlcanceOtUrl(otRowId);
+    if (!alcanceUrl) {
+      const errMsg = "missing_supabase_secret_for_alcance_link";
       await deps.supa
         .from("ots_extended")
         .update({ appsheet_alcance_last_error: errMsg })
@@ -151,14 +161,9 @@ export async function tickOtAlcanceOutbox(
       continue;
     }
 
-    // Build the Alcance_OT value: JSON summary + PDF URL.
-    const alcanceJson = row.alcance_jsonb as AlcanceShape | null;
-    const pdfPath = typeof row.alcance_pdf_path === "string" ? row.alcance_pdf_path : null;
-    const alcanceValue = buildAlcanceOtValue(alcanceJson, pdfPath);
-
     try {
       const result = await deps.appsheet.editOT(otRowId, idOrden, {
-        Alcance_OT: alcanceValue,
+        Alcance_OT: alcanceUrl,
       });
 
       if (result.alreadyGone) {
@@ -297,18 +302,11 @@ export async function tickOtAlcanceOutbox(
   return results;
 }
 
-function buildAlcanceOtValue(
-  alcance: AlcanceShape | null,
-  pdfPath: string | null
-): string {
-  if (!alcance) return pdfPath ? `PDF: ${pdfPath}` : "";
-  const parts: string[] = [];
-  parts.push(`[${alcance.especialidad}]`);
-  if (alcance.subcategoria) parts.push(alcance.subcategoria);
-  if (alcance.summary) parts.push(alcance.summary);
-  if (alcance.value_estimate) parts.push(`Valor: ${alcance.value_estimate}`);
-  if (pdfPath) parts.push(`PDF: ${pdfPath}`);
-  return parts.join(" | ").slice(0, 2000);
+function buildAlcanceOtUrl(otRowId: string): string | null {
+  const secret = process.env.SUPABASE_SECRET_KEY;
+  if (!secret) return null;
+  const base = ALCANCE_LINK_BASE_URL.replace(/\/+$/, "");
+  return `${base}/api/alcance/${signOtPublicToken(otRowId, secret)}`;
 }
 
 // ---------------------------------------------------------------------------

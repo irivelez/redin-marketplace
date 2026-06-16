@@ -376,9 +376,11 @@ export class AppSheetReadClient {
    * Edit an Ordenes_Trabajo row in AppSheet, identified by Row ID.
    *
    * Safety belt: pre-flights a Find by Row ID and verifies that the
-   * AppSheet row's ID_Orden (or Numero_Orden) matches `expectedIdOrden`
-   * before writing. On mismatch, throws — callers should treat this as
-   * "manual reconciliation needed" and leave the Supabase outbox pending.
+   * AppSheet row's ID_Orden (the table key) matches `expectedIdOrden`
+   * before writing. Numero_Orden (the consecutive) is NOT a fallback key —
+   * it is never the row key and treating it as one caused production 400s.
+   * On mismatch, throws — callers should treat this as "manual reconciliation
+   * needed" and leave the Supabase outbox pending.
    *
    * Special case: if AppSheet returns an error body containing "column"
    * and "not found" (case-insensitive), this function returns
@@ -415,7 +417,7 @@ export class AppSheetReadClient {
         `AppSheet OT integrity: ${matching.length} rows match Row ID ${rowId}; refusing to edit`
       );
     }
-    const actualIdOrden = matching[0]?.["ID_Orden"] ?? matching[0]?.["Numero_Orden"];
+    const actualIdOrden = matching[0]?.["ID_Orden"];
     if (actualIdOrden !== expectedIdOrden) {
       throw new Error(
         `AppSheet OT integrity: row ${rowId} has ID_Orden "${actualIdOrden ?? "(empty)"}", ` +
